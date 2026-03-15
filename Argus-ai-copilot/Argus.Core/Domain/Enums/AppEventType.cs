@@ -9,6 +9,7 @@ public enum AppEventType
     MeetingDetected,
     MeetingEnded,
     SpeakerChanged,
+    ActiveWindowChanged,
     HotkeyTriggered,
     ErrorOccurred
 }

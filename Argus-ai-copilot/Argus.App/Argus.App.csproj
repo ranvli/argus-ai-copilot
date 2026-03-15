@@ -20,6 +20,9 @@
     <ProjectReference Include="..\Argus.Core\Argus.Core.csproj" />
     <ProjectReference Include="..\Argus.Infrastructure\Argus.Infrastructure.csproj" />
     <ProjectReference Include="..\Argus.AI\Argus.AI.csproj" />
+    <ProjectReference Include="..\Argus.Context\Argus.Context.csproj" />
+    <ProjectReference Include="..\Argus.Audio\Argus.Audio.csproj" />
+    <ProjectReference Include="..\Argus.Transcription\Argus.Transcription.csproj" />
   </ItemGroup>
 
   <ItemGroup>

@@ -1,11 +1,17 @@
-﻿using Argus.AI.Configuration;
+using Argus.AI.Configuration;
 using Argus.AI.Discovery;
 using Argus.App.Diagnostics;
 using Argus.App.Services;
+using Argus.Audio.Capture;
+using Argus.Core.Contracts.Services;
+using Argus.Core.Domain.Entities;
+using Argus.Infrastructure.Storage;
 using Microsoft.Extensions.Logging;
 using System.ComponentModel;
 using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Media;
+using System.Windows.Threading;
 
 namespace Argus.App;
 
@@ -14,20 +20,40 @@ public partial class MainWindow : Window
     private readonly ILogger<MainWindow> _logger;
     private readonly IAppBootstrapper _bootstrapper;
     private readonly IStartupDiagnosticsService _diagnostics;
+    private readonly ISessionCoordinator _coordinator;
+    private readonly ISessionStatePublisher _statePublisher;
+    private readonly IAudioStatusPublisher _audioPublisher;
+
+    // Ticks every second to refresh the live session duration label.
+    private readonly DispatcherTimer _durationTimer;
+
+    // The last snapshot received � held so the timer can re-read StartedAt.
+    private SessionStateSnapshot _currentSnapshot = SessionStateSnapshot.Idle;
+
+    // Running count of segments shown (for the cap check).
+    private int _displayedSegments;
+    private const int MaxDisplayedSegments = 50;
 
     private static readonly SolidColorBrush OkBrush      = new(System.Windows.Media.Color.FromRgb(0x2E, 0x7D, 0x32));
     private static readonly SolidColorBrush WarnBrush    = new(System.Windows.Media.Color.FromRgb(0xF5, 0x7C, 0x00));
     private static readonly SolidColorBrush ErrorBrush   = new(System.Windows.Media.Color.FromRgb(0xC6, 0x28, 0x28));
     private static readonly SolidColorBrush NeutralBrush = new(System.Windows.Media.Color.FromRgb(0x75, 0x75, 0x75));
+    private static readonly SolidColorBrush ListeningBrush = new(System.Windows.Media.Color.FromRgb(0x0D, 0x87, 0x4E));
 
     public MainWindow(
         ILogger<MainWindow> logger,
         IAppBootstrapper bootstrapper,
-        IStartupDiagnosticsService diagnostics)
+        IStartupDiagnosticsService diagnostics,
+        ISessionCoordinator coordinator,
+        ISessionStatePublisher statePublisher,
+        IAudioStatusPublisher audioPublisher)
     {
-        _logger       = logger;
-        _bootstrapper = bootstrapper;
-        _diagnostics  = diagnostics;
+        _logger         = logger;
+        _bootstrapper   = bootstrapper;
+        _diagnostics    = diagnostics;
+        _coordinator    = coordinator;
+        _statePublisher = statePublisher;
+        _audioPublisher = audioPublisher;
 
         InitializeComponent();
 
@@ -35,18 +61,330 @@ public partial class MainWindow : Window
             "MainWindow initialized. Bootstrap complete: {IsBootstrapped}",
             _bootstrapper.IsInitialized);
 
-        // If diagnostics already finished before the window was constructed, apply immediately.
+        // ?? Duration timer ?????????????????????????????????????????????????
+        _durationTimer = new DispatcherTimer(DispatcherPriority.Background)
+        {
+            Interval = TimeSpan.FromSeconds(1)
+        };
+        _durationTimer.Tick += (_, _) => RefreshDurationLabel();
+
+        // Subscribe to session state changes
+        _statePublisher.SnapshotChanged += OnSnapshotChanged;
+
+        // Subscribe to audio/transcription status changes
+        _audioPublisher.AudioStatusChanged += OnAudioStatusChanged;
+
+        // Subscribe to live transcript segments
+        _audioPublisher.TranscriptSegmentsReceived += OnTranscriptSegmentsReceived;
+
+        // Apply the current snapshots immediately
+        ApplySnapshot(_statePublisher.Snapshot);
+        ApplyAudioStatus(_audioPublisher.AudioStatus);
+
+        // Diagnostics: apply if already available, otherwise subscribe
         if (_diagnostics.Result is not null)
             ApplyDiagnostics(_diagnostics.Result);
         else
             _diagnostics.DiagnosticsReady += OnDiagnosticsReady;
     }
 
-    // ── Diagnostics ───────────────────────────────────────────────────────────
+    // -- Session state ---------------------------------------------------------
+
+    private void OnSnapshotChanged(object? sender, SessionStateSnapshot snap)
+    {
+        Dispatcher.InvokeAsync(() => ApplySnapshot(snap));
+    }
+
+    // -- Audio status ----------------------------------------------------------
+
+    private void OnAudioStatusChanged(object? sender, AudioStatusSnapshot audio)
+    {
+        Dispatcher.InvokeAsync(() => ApplyAudioStatus(audio));
+    }
+
+    private void ApplyAudioStatus(AudioStatusSnapshot audio)
+    {
+        // Microphone dot + status text
+        MicDot.Fill = audio.MicrophoneStatus switch
+        {
+            AudioCaptureStatus.Capturing   => ListeningBrush,
+            AudioCaptureStatus.Paused      => WarnBrush,
+            AudioCaptureStatus.DeviceError => ErrorBrush,
+            AudioCaptureStatus.NoDevice    => ErrorBrush,
+            _                              => NeutralBrush
+        };
+        MicStatusText.Text  = audio.MicrophoneStatusDisplay;
+        MicDeviceText.Text  = string.IsNullOrWhiteSpace(audio.MicrophoneDevice) ? "�" : audio.MicrophoneDevice;
+
+        // System audio dot + status text
+        SystemAudioDot.Fill = audio.SystemAudioStatus switch
+        {
+            AudioCaptureStatus.Capturing   => ListeningBrush,
+            AudioCaptureStatus.Paused      => WarnBrush,
+            AudioCaptureStatus.DeviceError => ErrorBrush,
+            _                              => NeutralBrush
+        };
+        SystemAudioStatusText.Text  = audio.SystemAudioStatusDisplay;
+        SystemAudioDeviceText.Text  = string.IsNullOrWhiteSpace(audio.SystemAudioDevice) ? "�" : audio.SystemAudioDevice;
+
+        // Transcription dot + text
+        TranscriptionDot.Fill = audio.TranscriptionStatus switch
+        {
+            TranscriptionPipelineStatus.Transcribing => ListeningBrush,
+            TranscriptionPipelineStatus.Error        => ErrorBrush,
+            TranscriptionPipelineStatus.NoProvider   => WarnBrush,
+            _                                        => NeutralBrush
+        };
+        TranscriptionStatusText.Text = audio.TranscriptionStatusDisplay;
+
+        // Provider / model
+        TranscriptionProviderText.Text = audio.TranscriptionConfigured
+            ? audio.TranscriptionProviderDisplay
+            : "? Not configured";
+
+        // Whisper model download state (only shown for WhisperNet provider)
+        var isWhisperNet = audio.WhisperDownloadState != WhisperModelDownloadState.NotApplicable;
+        WhisperDownloadStatePanel.Visibility = isWhisperNet ? Visibility.Visible : Visibility.Collapsed;
+        WhisperModelPathPanel.Visibility     = isWhisperNet ? Visibility.Visible : Visibility.Collapsed;
+        if (isWhisperNet)
+        {
+            WhisperDownloadStateText.Text = audio.WhisperDownloadStateDisplay;
+            WhisperDownloadStateText.Foreground = audio.WhisperDownloadState switch
+            {
+                WhisperModelDownloadState.Ready      => OkBrush,
+                WhisperModelDownloadState.Downloading => WarnBrush,
+                WhisperModelDownloadState.Failed     => ErrorBrush,
+                _                                    => NeutralBrush
+            };
+            WhisperModelPathText.Text = string.IsNullOrWhiteSpace(audio.WhisperModelPath)
+                ? "�"
+                : audio.WhisperModelPath;
+        }
+
+        // Queue length
+        TranscriptionQueueText.Text = audio.PendingChunks > 0
+            ? $"{audio.PendingChunks} chunk{(audio.PendingChunks == 1 ? "" : "s")} queued"
+            : "0 chunks";
+
+        // Last transcript time
+        LastTranscriptTimeText.Text = audio.LastTranscriptionAt.HasValue
+            ? audio.LastTranscriptionAt.Value.ToLocalTime().ToString("HH:mm:ss")
+            : "�";
+
+        // Last transcription error
+        LastTranscriptionErrorText.Text = string.IsNullOrWhiteSpace(audio.TranscriptionError)
+            ? "�"
+            : audio.TranscriptionError;
+        LastTranscriptionErrorText.Foreground = string.IsNullOrWhiteSpace(audio.TranscriptionError)
+            ? NeutralBrush
+            : ErrorBrush;
+
+        // Not-configured warning banner
+        if (!audio.TranscriptionConfigured && audio.MicrophoneStatus == AudioCaptureStatus.Capturing)
+        {
+            TranscriptionNotConfiguredBanner.Visibility  = Visibility.Visible;
+            TranscriptionNotConfiguredText.Text =
+                "? No transcription provider is configured. Audio is being captured but will not be transcribed.\n" +
+                "WhisperNetLocal (fully local, no API key) should be enabled by default. " +
+                "Check that ArgusAI:Profiles contains a WhisperNetLocal profile with \"Enabled\": true " +
+                "and that ArgusAI:Defaults:Transcription is set to \"WhisperNetLocal\" in appsettings.json.";
+        }
+        else
+        {
+            TranscriptionNotConfiguredBanner.Visibility = Visibility.Collapsed;
+        }
+    }
+
+    // -- Live transcript -------------------------------------------------------
+
+    private void OnTranscriptSegmentsReceived(object? sender, IReadOnlyList<TranscriptSegment> segments)
+    {
+        Dispatcher.InvokeAsync(() => AppendTranscriptSegments(segments));
+    }
+
+    private void AppendTranscriptSegments(IReadOnlyList<TranscriptSegment> segments)
+    {
+        foreach (var seg in segments)
+        {
+            if (string.IsNullOrWhiteSpace(seg.Text)) continue;
+
+            // Show the list panel + scroll container on first segment
+            if (_displayedSegments == 0)
+            {
+                TranscriptPlaceholder.Visibility  = Visibility.Collapsed;
+                TranscriptListBorder.Visibility   = Visibility.Visible;
+            }
+
+            // Trim oldest entries when cap is reached
+            if (_displayedSegments >= MaxDisplayedSegments
+                && TranscriptItemsPanel.Children.Count > 0)
+            {
+                TranscriptItemsPanel.Children.RemoveAt(0);
+                _displayedSegments--;
+            }
+
+            var row = BuildTranscriptRow(seg);
+            TranscriptItemsPanel.Children.Add(row);
+            _displayedSegments++;
+        }
+
+        // Auto-scroll to the latest segment
+        TranscriptScrollViewer.ScrollToBottom();
+    }
+
+    private static Border BuildTranscriptRow(TranscriptSegment seg)
+    {
+        var timeLabel = new TextBlock
+        {
+            Text              = seg.CreatedAt.ToLocalTime().ToString("HH:mm:ss"),
+            FontSize          = 10,
+            Foreground        = new SolidColorBrush(System.Windows.Media.Color.FromRgb(0x9E, 0x9E, 0x9E)),
+            VerticalAlignment = VerticalAlignment.Top,
+            Margin            = new Thickness(0, 2, 8, 0),
+            MinWidth          = 56
+        };
+
+        var speakerLabel = new TextBlock
+        {
+            Text              = seg.SpeakerType.ToString(),
+            FontSize          = 10,
+            FontWeight        = FontWeights.SemiBold,
+            Foreground        = new SolidColorBrush(System.Windows.Media.Color.FromRgb(0x42, 0x42, 0x42)),
+            VerticalAlignment = VerticalAlignment.Top,
+            Margin            = new Thickness(0, 2, 8, 0),
+            MinWidth          = 60
+        };
+
+        var textBlock = new TextBlock
+        {
+            Text         = seg.Text,
+            FontSize     = 12,
+            Foreground   = new SolidColorBrush(System.Windows.Media.Color.FromRgb(0x21, 0x21, 0x21)),
+            TextWrapping = TextWrapping.Wrap
+        };
+
+        var content = new StackPanel { Orientation = System.Windows.Controls.Orientation.Horizontal };
+        content.Children.Add(timeLabel);
+        content.Children.Add(speakerLabel);
+        content.Children.Add(textBlock);
+
+        return new Border
+        {
+            Child           = content,
+            Padding         = new Thickness(4, 3, 4, 3),
+            BorderBrush     = new SolidColorBrush(System.Windows.Media.Color.FromRgb(0xEE, 0xEE, 0xEE)),
+            BorderThickness = new Thickness(0, 0, 0, 1)
+        };
+    }
+
+    private void ApplySnapshot(SessionStateSnapshot snap)
+    {
+        _currentSnapshot = snap;
+
+        // -- State label and dot -----------------------------------------------
+        SessionStateText.Text = snap.StateLabel;
+        SessionStateDot.Fill = snap.LifecycleState switch
+        {
+            Core.Domain.Enums.SessionLifecycleState.Listening => ListeningBrush,
+            Core.Domain.Enums.SessionLifecycleState.Paused    => WarnBrush,
+            Core.Domain.Enums.SessionLifecycleState.Stopping  => WarnBrush,
+            Core.Domain.Enums.SessionLifecycleState.Completed => OkBrush,
+            _                                                  => NeutralBrush
+        };
+
+        // -- Session details ---------------------------------------------------
+        SessionIdText.Text = snap.SessionId.HasValue
+            ? snap.SessionId.Value.ToString("D")
+            : "�";
+
+        SessionStartedText.Text = snap.SessionStartedAt.HasValue
+            ? snap.SessionStartedAt.Value.ToLocalTime().ToString("HH:mm:ss")
+            : "�";
+
+        SessionEventCountText.Text = snap.AppEventCount.ToString("N0");
+
+        TranscriptSegmentCountText.Text = snap.TranscriptSegmentCount > 0
+            ? $"({snap.TranscriptSegmentCount} segment{(snap.TranscriptSegmentCount == 1 ? "" : "s")})"
+            : "(0 segments)";
+
+        // Refresh duration now; timer keeps it ticking while active.
+        RefreshDurationLabel();
+
+        // Start or stop the 1-second timer based on whether a session is active.
+        if (snap.IsActive)
+            _durationTimer.Start();
+        else
+            _durationTimer.Stop();
+
+        // -- Active window -----------------------------------------------------
+        ActiveAppText.Text = string.IsNullOrWhiteSpace(snap.ActiveProcessName)
+            ? "�"
+            : snap.ActiveProcessName;
+
+        ActiveProcessIdText.Text = snap.ActiveProcessId > 0
+            ? snap.ActiveProcessId.ToString()
+            : "�";
+
+        ActiveWindowTitleText.Text = string.IsNullOrWhiteSpace(snap.ActiveWindowTitle)
+            ? "�"
+            : snap.ActiveWindowTitle;
+
+        // -- Button states -----------------------------------------------------
+        var isIdle      = snap.LifecycleState == Core.Domain.Enums.SessionLifecycleState.Idle;
+        var isListening = snap.LifecycleState == Core.Domain.Enums.SessionLifecycleState.Listening;
+        var isPaused    = snap.LifecycleState == Core.Domain.Enums.SessionLifecycleState.Paused;
+        var isActive    = snap.IsActive;
+
+        StartSessionButton.IsEnabled  = isIdle;
+        PauseSessionButton.IsEnabled  = isListening;
+        ResumeSessionButton.IsEnabled = isPaused;
+        StopSessionButton.IsEnabled   = isActive;
+    }
+
+    private void RefreshDurationLabel()
+    {
+        SessionDurationText.Text = _currentSnapshot.GetDurationDisplay(DateTimeOffset.UtcNow);
+    }
+
+    // -- Button handlers -------------------------------------------------------
+
+    private async void StartSessionButton_Click(object sender, RoutedEventArgs e)
+    {
+        StartSessionButton.IsEnabled = false;
+        try
+        {
+            await _coordinator.StartSessionAsync(
+                $"Session {DateTimeOffset.Now:yyyy-MM-dd HH:mm}");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to start session.");
+            StartSessionButton.IsEnabled = true;
+        }
+    }
+
+    private async void PauseSessionButton_Click(object sender, RoutedEventArgs e)
+    {
+        try   { await _coordinator.PauseSessionAsync(); }
+        catch (Exception ex) { _logger.LogError(ex, "Failed to pause session."); }
+    }
+
+    private async void ResumeSessionButton_Click(object sender, RoutedEventArgs e)
+    {
+        try   { await _coordinator.ResumeSessionAsync(); }
+        catch (Exception ex) { _logger.LogError(ex, "Failed to resume session."); }
+    }
+
+    private async void StopSessionButton_Click(object sender, RoutedEventArgs e)
+    {
+        try   { await _coordinator.StopSessionAsync(); }
+        catch (Exception ex) { _logger.LogError(ex, "Failed to stop session."); }
+    }
+
+    // -- Diagnostics -----------------------------------------------------------
 
     private void OnDiagnosticsReady(object? sender, StartupDiagnosticsResult result)
     {
-        // DiagnosticsReady fires on the hosted-service thread — marshal to UI.
         Dispatcher.InvokeAsync(() => ApplyDiagnostics(result));
     }
 
@@ -54,23 +392,40 @@ public partial class MainWindow : Window
     {
         DiagnosticsTimestamp.Text = $"Last checked: {r.CapturedAt.ToLocalTime():HH:mm:ss}";
 
-        // ── Storage ───────────────────────────────────────────────────────────
-        StorageDot.Fill     = r.StorageAvailable ? OkBrush : ErrorBrush;
-        StorageStatus.Text  = r.StorageAvailable
+        // ?? System Status card ????????????????????????????????????????????????
+        StorageDot.Fill    = r.StorageAvailable ? OkBrush : ErrorBrush;
+        StorageStatus.Text = r.StorageAvailable
             ? $"OK  ({r.DataFolderPath})"
             : $"Error: {r.StorageError}";
 
-        // ── Database ──────────────────────────────────────────────────────────
         DatabaseDot.Fill    = r.DatabaseAvailable ? OkBrush : ErrorBrush;
         DatabaseStatus.Text = r.DatabaseAvailable
             ? $"OK  ({r.DatabasePath})"
             : $"Error: {r.DatabaseError}";
 
-        // ── Providers ─────────────────────────────────────────────────────────
+        // ?? Storage Paths card ????????????????????????????????????????????????
+        if (r.StoragePaths is { } sp)
+        {
+            StorageModeDot.Fill      = r.StorageAvailable ? OkBrush : WarnBrush;
+            StorageModeText.Text     = sp.ModeDisplay;
+            StorageDataPathText.Text = sp.DataFolder;
+            StorageCachePathText.Text    = sp.CacheFolder;
+            StorageArtifactPathText.Text = sp.ArtifactsFolder;
+            StorageDatabasePathText.Text = sp.DatabasePath;
+
+            // Show the selection reason banner only in non-Default modes
+            if (sp.Mode != StorageMode.Default
+                && !string.IsNullOrWhiteSpace(sp.DataRootReason))
+            {
+                StorageDataReasonText.Text   = sp.DataRootReason;
+                StorageReasonBanner.Visibility = Visibility.Visible;
+            }
+        }
+
+        // ?? Provider / routing cards ??????????????????????????????????????????
         if (r.ProviderDiscovery is { } disc)
             ApplyProviderStatus(disc);
 
-        // ── Routing ───────────────────────────────────────────────────────────
         if (r.EffectiveRouting is { } routing)
         {
             RoutingModeText.Text = routing.Mode.ToString();
@@ -80,40 +435,35 @@ public partial class MainWindow : Window
             ApplyWorkflowRow(AiWorkflow.ScreenExplain,  routing, ScreenExplainModel,  ScreenExplainState);
         }
 
-        // ── Global warnings ───────────────────────────────────────────────────
         if (!r.AnyProviderAvailable)
-        {
             NoProvidersBanner.Visibility = Visibility.Visible;
-        }
     }
 
     private void ApplyProviderStatus(ProviderDiscoveryResult disc)
     {
-        // Ollama
         (OllamaDot.Fill, OllamaStatus.Text) = disc.OllamaAvailability switch
         {
-            ProviderAvailability.Available    => (OkBrush,      $"Running  ({disc.OllamaModels.Count} model(s))  @ {disc.OllamaEndpoint}"),
-            ProviderAvailability.NoModels     => (WarnBrush,    $"Running but no models installed  @ {disc.OllamaEndpoint}"),
-            ProviderAvailability.Unreachable  => (ErrorBrush,   $"Not reachable  @ {disc.OllamaEndpoint}"),
-            ProviderAvailability.Error        => (ErrorBrush,   $"Error: {disc.OllamaError}"),
-            _                                 => (NeutralBrush, "Not configured")
+            ProviderAvailability.Available   => (OkBrush,      $"Running  ({disc.OllamaModels.Count} model(s))  @ {disc.OllamaEndpoint}"),
+            ProviderAvailability.NoModels    => (WarnBrush,    $"Running but no models installed  @ {disc.OllamaEndpoint}"),
+            ProviderAvailability.Unreachable => (ErrorBrush,   $"Not reachable  @ {disc.OllamaEndpoint}"),
+            ProviderAvailability.Error       => (ErrorBrush,   $"Error: {disc.OllamaError}"),
+            _                                => (NeutralBrush, "Not configured")
         };
 
         if (disc.OllamaAvailability is ProviderAvailability.Unreachable or ProviderAvailability.NoModels)
         {
             OllamaWarningText.Text = disc.OllamaAvailability == ProviderAvailability.NoModels
-                ? "⚠ Ollama is running but has no models. Run: ollama pull llama3"
-                : "⚠ Ollama is not running. Start it with: ollama serve";
+                ? "? Ollama is running but has no models. Run: ollama pull llama3"
+                : "? Ollama is not running. Start it with: ollama serve";
             OllamaWarningBanner.Visibility = Visibility.Visible;
         }
 
-        // OpenAI
         (OpenAiDot.Fill, OpenAiStatus.Text) = disc.OpenAiAvailability switch
         {
-            ProviderAvailability.Available    => (OkBrush,      "API key configured"),
+            ProviderAvailability.Available     => (OkBrush,      "API key configured"),
             ProviderAvailability.NotConfigured => (NeutralBrush, "Not configured (set OPENAI_API_KEY to enable)"),
-            ProviderAvailability.Error        => (ErrorBrush,   "Configuration error"),
-            _                                 => (NeutralBrush, "Unknown")
+            ProviderAvailability.Error         => (ErrorBrush,   "Configuration error"),
+            _                                  => (NeutralBrush, "Unknown")
         };
     }
 
@@ -126,8 +476,8 @@ public partial class MainWindow : Window
         var wf = routing.ForWorkflow(workflow);
         if (wf is null)
         {
-            modelText.Text      = "—";
-            stateText.Text      = "—";
+            modelText.Text       = "�";
+            stateText.Text       = "�";
             stateText.Foreground = NeutralBrush;
             return;
         }
@@ -136,24 +486,32 @@ public partial class MainWindow : Window
 
         if (wf.IsFullyAvailable)
         {
-            stateText.Text       = "✓ Ready";
+            stateText.Text       = "? Ready";
             stateText.Foreground = OkBrush;
         }
         else
         {
-            stateText.Text       = "⚠ Partial";
+            stateText.Text       = "? Partial";
             stateText.Foreground = WarnBrush;
         }
     }
 
-    // ── Window lifecycle ──────────────────────────────────────────────────────
+    // -- Window lifecycle ------------------------------------------------------
 
     protected override void OnClosing(CancelEventArgs e)
     {
-        // Tray-first: intercept the close gesture and hide the window instead.
         e.Cancel = true;
         Hide();
         _logger.LogDebug("MainWindow hidden (close intercepted for tray-first mode).");
         base.OnClosing(e);
+    }
+
+    // Called by App.xaml.cs when the host is shutting down for real.
+    internal void OnHostShuttingDown()
+    {
+        _statePublisher.SnapshotChanged             -= OnSnapshotChanged;
+        _audioPublisher.AudioStatusChanged           -= OnAudioStatusChanged;
+        _audioPublisher.TranscriptSegmentsReceived   -= OnTranscriptSegmentsReceived;
+        _diagnostics.DiagnosticsReady                -= OnDiagnosticsReady;
     }
 }

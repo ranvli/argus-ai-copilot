@@ -12,22 +12,35 @@ public static class InfrastructureServiceExtensions
 {
     /// <summary>
     /// Registers all Argus.Infrastructure services:
-    /// path provider, artifact storage, EF Core / SQLite, all repositories,
+    /// storage options, drive evaluator, path resolver, path provider,
+    /// artifact storage, EF Core / SQLite, all repositories,
     /// and the startup database initializer.
     /// Call this from <c>Program.cs</c> inside <c>ConfigureServices</c>.
     /// </summary>
     public static IServiceCollection AddArgusInfrastructure(this IServiceCollection services)
     {
+        // ── Storage options ───────────────────────────────────────────────────
+        // Ensure StorageOptions is registered with default values.
+        // Program.cs binds the "Storage" configuration section via Configure<StorageOptions>.
+        services.AddOptions<StorageOptions>();
+
+        // ── Drive evaluator ───────────────────────────────────────────────────
+        // Transient — called once at startup, no state kept after resolution.
+        services.AddTransient<DriveEvaluator>();
+
+        // ── Storage path resolver ─────────────────────────────────────────────
+        // Singleton — resolves once, result is immutable.
+        services.AddSingleton<IStoragePathResolver, StoragePathResolver>();
+
         // ── Path provider ─────────────────────────────────────────────────────
-        // Singleton — stateless, only computes paths from Environment.SpecialFolder.
+        // Singleton — delegates to the resolver; all path properties are derived
+        // from the single ResolvedStoragePaths computed on first construction.
         services.AddSingleton<IPathProvider, PathProvider>();
 
         // ── Artifact storage ──────────────────────────────────────────────────
-        // Singleton — pure file-I/O helper, thread-safe.
         services.AddSingleton<IArtifactStorage, ArtifactStorage>();
 
         // ── EF Core DbContext — SQLite ─────────────────────────────────────────
-        // Path is resolved via IPathProvider so it is always under %LocalAppData%\ArgusAI\data\.
         services.AddDbContext<ArgusDbContext>((sp, options) =>
         {
             var paths = sp.GetRequiredService<IPathProvider>();
@@ -35,7 +48,6 @@ public static class InfrastructureServiceExtensions
         });
 
         // ── Repositories ───────────────────────────────────────────────────────
-        // Scoped — one instance per DI scope (matches DbContext lifetime).
         services.AddScoped<ISessionRepository,        SessionRepository>();
         services.AddScoped<ITranscriptRepository,     TranscriptRepository>();
         services.AddScoped<IScreenshotRepository,     ScreenshotRepository>();
@@ -46,12 +58,8 @@ public static class InfrastructureServiceExtensions
         services.AddScoped<ISpeakerProfileRepository, SpeakerProfileRepository>();
 
         // ── DB initializer ────────────────────────────────────────────────────
-        // Runs once at startup: creates directories + applies EF migrations.
-        // Registered as the FIRST hosted service so it completes before anything
-        // else (session coordinator, tray service) tries to use the database.
         services.AddHostedService<DbInitializer>();
 
         return services;
     }
 }
-

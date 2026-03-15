@@ -1,5 +1,6 @@
 using Argus.AI.Discovery;
 using Argus.AI.Selection;
+using Argus.Infrastructure.Storage;
 
 namespace Argus.App.Diagnostics;
 
@@ -13,10 +14,10 @@ public sealed class StartupDiagnosticsResult
 
     public DateTimeOffset CapturedAt { get; init; } = DateTimeOffset.UtcNow;
 
-    // ── Storage ───────────────────────────────────────────────────────────────
+    // ── Storage paths ─────────────────────────────────────────────────────────
 
-    /// <summary>Path of the data folder (e.g. %LocalAppData%\ArgusAI\data\).</summary>
-    public string DataFolderPath { get; init; } = string.Empty;
+    /// <summary>The fully resolved storage paths with selection mode and reasons.</summary>
+    public ResolvedStoragePaths? StoragePaths { get; init; }
 
     /// <summary>True when the data folder exists and is writable.</summary>
     public bool StorageAvailable { get; init; }
@@ -24,9 +25,6 @@ public sealed class StartupDiagnosticsResult
     public string? StorageError { get; init; }
 
     // ── Database ──────────────────────────────────────────────────────────────
-
-    /// <summary>Full path to the SQLite database file.</summary>
-    public string DatabasePath { get; init; } = string.Empty;
 
     /// <summary>True when the database file exists and was opened successfully.</summary>
     public bool DatabaseAvailable { get; init; }
@@ -41,7 +39,10 @@ public sealed class StartupDiagnosticsResult
 
     public EffectiveRoutingResult? EffectiveRouting { get; init; }
 
-    // ── Convenience ───────────────────────────────────────────────────────────
+    // ── Convenience aliases (used by existing UI code) ────────────────────────
+
+    public string DataFolderPath => StoragePaths?.DataFolder ?? string.Empty;
+    public string DatabasePath   => StoragePaths?.DatabasePath ?? string.Empty;
 
     public bool OllamaAvailable =>
         ProviderDiscovery?.OllamaAvailability == ProviderAvailability.Available;

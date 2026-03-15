@@ -16,6 +16,7 @@ internal sealed class SessionConfiguration : IEntityTypeConfiguration<Session>
         b.Property(s => s.Title).HasMaxLength(500).IsRequired();
         b.Property(s => s.Type).HasConversion<string>().HasMaxLength(50);
         b.Property(s => s.ListeningMode).HasConversion<string>().HasMaxLength(50);
+        b.Property(s => s.LifecycleState).HasConversion<string>().HasMaxLength(50).IsRequired();
         b.Property(s => s.ApplicationContext).HasMaxLength(500);
 
         // DateTimeOffset stored as UTC text — SQLite-friendly

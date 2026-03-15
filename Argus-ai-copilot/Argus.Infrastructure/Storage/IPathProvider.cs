@@ -1,28 +1,34 @@
 namespace Argus.Infrastructure.Storage;
 
 /// <summary>
-/// Resolves well-known local-app-data folder paths used by ArgusAI.
-/// All paths are rooted at <c>%LocalAppData%\ArgusAI\</c>.
+/// Resolves well-known storage paths used by ArgusAI.
+/// The effective roots depend on the configured <see cref="StorageMode"/>;
+/// in Default mode everything lives under <c>%LocalAppData%\ArgusAI\</c>.
 /// </summary>
 public interface IPathProvider
 {
+    // ── Mode and diagnostics ──────────────────────────────────────────────────
+
+    /// <summary>The resolved paths and selection reasons produced at startup.</summary>
+    ResolvedStoragePaths ResolvedPaths { get; }
+
     // ── Root ──────────────────────────────────────────────────────────────────
 
-    /// <summary>%LocalAppData%\ArgusAI\</summary>
+    /// <summary>Legacy alias — root of the data + logs tree.</summary>
     string AppDataRoot { get; }
 
     // ── Top-level sub-folders ─────────────────────────────────────────────────
 
-    /// <summary>%LocalAppData%\ArgusAI\data\  — SQLite database lives here.</summary>
+    /// <summary>Folder for the SQLite database.</summary>
     string DataFolder { get; }
 
-    /// <summary>%LocalAppData%\ArgusAI\artifacts\  — binary artifact files.</summary>
+    /// <summary>Folder for large binary artifact files.</summary>
     string ArtifactsFolder { get; }
 
-    /// <summary>%LocalAppData%\ArgusAI\logs\  — structured log files.</summary>
+    /// <summary>Folder for structured log files.</summary>
     string LogsFolder { get; }
 
-    /// <summary>%LocalAppData%\ArgusAI\cache\  — transient cache files.</summary>
+    /// <summary>Folder for transient cache files.</summary>
     string CacheFolder { get; }
 
     // ── Derived paths ─────────────────────────────────────────────────────────
@@ -30,9 +36,11 @@ public interface IPathProvider
     /// <summary>Full path to the SQLite database file.</summary>
     string DatabasePath { get; }
 
+    /// <summary>Folder for local Whisper GGML model files.</summary>
+    string WhisperModelsFolder { get; }
+
     /// <summary>
     /// Returns the full path to a session-scoped artifact sub-folder.
-    /// The sub-folder is one of: screenshots, thumbnails, audio, recordings.
     /// </summary>
     string GetSessionArtifactFolder(Guid sessionId, ArtifactSubfolder subfolder);
 
@@ -51,4 +59,3 @@ public enum ArtifactSubfolder
     Recordings,
     Transcripts
 }
-

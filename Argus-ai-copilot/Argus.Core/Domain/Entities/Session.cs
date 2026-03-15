@@ -9,6 +9,13 @@ public class Session
     public string Title { get; set; } = string.Empty;
     public SessionType Type { get; set; } = SessionType.Unknown;
     public ListeningMode ListeningMode { get; set; } = ListeningMode.Microphone;
+
+    /// <summary>
+    /// Persisted lifecycle state. Updated by SessionCoordinatorService on every
+    /// transition so that the database always reflects reality.
+    /// </summary>
+    public SessionLifecycleState LifecycleState { get; set; } = SessionLifecycleState.Idle;
+
     public DateTimeOffset StartedAt { get; set; }
     public DateTimeOffset? EndedAt { get; set; }
     public bool IsActive => EndedAt is null;

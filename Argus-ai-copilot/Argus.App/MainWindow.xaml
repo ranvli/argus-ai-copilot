@@ -5,7 +5,7 @@
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:local="clr-namespace:Argus.App"
         mc:Ignorable="d"
-        Title="Argus AI Copilot" Height="580" Width="820"
+        Title="Argus AI Copilot" Height="1060" Width="820"
         MinWidth="680" MinHeight="520"
         WindowStartupLocation="CenterScreen"
         Background="#F5F5F5">
@@ -75,6 +75,102 @@
         <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
             <StackPanel>
 
+                <!-- ── Session status card ───────────────────────────────── -->
+                <Border Style="{StaticResource Card}">
+                    <StackPanel>
+                        <TextBlock Text="Session" Style="{StaticResource SectionHeader}"/>
+
+                        <!-- Listening state -->
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
+                            <Ellipse x:Name="SessionStateDot" Width="10" Height="10"
+                                     Fill="{StaticResource NeutralBrush}"
+                                     Margin="0,0,8,0" VerticalAlignment="Center"/>
+                            <TextBlock Text="State" Style="{StaticResource StatusLabel}"/>
+                            <TextBlock x:Name="SessionStateText" Text="Idle"
+                                       FontWeight="SemiBold"
+                                       Style="{StaticResource StatusValue}"/>
+                        </StackPanel>
+
+                        <!-- Session ID -->
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
+                            <TextBlock Width="18" Margin="0,0,8,0"/>
+                            <TextBlock Text="Session ID" Style="{StaticResource StatusLabel}"/>
+                            <TextBlock x:Name="SessionIdText" Text="—"
+                                       FontSize="11" FontFamily="Consolas"
+                                       Foreground="#757575" VerticalAlignment="Center"/>
+                        </StackPanel>
+
+                        <!-- Start time -->
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
+                            <TextBlock Width="18" Margin="0,0,8,0"/>
+                            <TextBlock Text="Started" Style="{StaticResource StatusLabel}"/>
+                            <TextBlock x:Name="SessionStartedText" Text="—" Style="{StaticResource StatusValue}"/>
+                        </StackPanel>
+
+                        <!-- Live elapsed duration -->
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
+                            <TextBlock Width="18" Margin="0,0,8,0"/>
+                            <TextBlock Text="Duration" Style="{StaticResource StatusLabel}"/>
+                            <TextBlock x:Name="SessionDurationText" Text="—"
+                                       FontFamily="Consolas" FontSize="13"
+                                       Foreground="#1565C0"
+                                       VerticalAlignment="Center"/>
+                        </StackPanel>
+
+                        <!-- Event count -->
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Width="18" Margin="0,0,8,0"/>
+                            <TextBlock Text="Events captured" Style="{StaticResource StatusLabel}"/>
+                            <TextBlock x:Name="SessionEventCountText" Text="0" Style="{StaticResource StatusValue}"/>
+                        </StackPanel>
+
+                        <!-- Controls -->
+                        <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                            <Button x:Name="StartSessionButton"  Content="▶ Start Listening"
+                                    Padding="10,4" Margin="0,0,8,0"
+                                    Click="StartSessionButton_Click"/>
+                            <Button x:Name="PauseSessionButton"  Content="⏸ Pause"
+                                    Padding="10,4" Margin="0,0,8,0" IsEnabled="False"
+                                    Click="PauseSessionButton_Click"/>
+                            <Button x:Name="ResumeSessionButton" Content="▶ Resume"
+                                    Padding="10,4" Margin="0,0,8,0" IsEnabled="False"
+                                    Click="ResumeSessionButton_Click"/>
+                            <Button x:Name="StopSessionButton"   Content="■ Stop"
+                                    Padding="10,4" IsEnabled="False"
+                                    Click="StopSessionButton_Click"/>
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+
+                <!-- ── Active window context card ────────────────────────── -->
+                <Border Style="{StaticResource Card}">
+                    <StackPanel>
+                        <TextBlock Text="Active Window Context" Style="{StaticResource SectionHeader}"/>
+
+                        <!-- App / process name -->
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
+                            <TextBlock Text="Application" Style="{StaticResource StatusLabel}"/>
+                            <TextBlock x:Name="ActiveAppText" Text="—"
+                                       Style="{StaticResource StatusValue}"/>
+                        </StackPanel>
+
+                        <!-- Process ID -->
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
+                            <TextBlock Text="Process ID" Style="{StaticResource StatusLabel}"/>
+                            <TextBlock x:Name="ActiveProcessIdText" Text="—"
+                                       FontFamily="Consolas" FontSize="11"
+                                       Foreground="#757575" VerticalAlignment="Center"/>
+                        </StackPanel>
+
+                        <!-- Window title -->
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="Window title" Style="{StaticResource StatusLabel}"/>
+                            <TextBlock x:Name="ActiveWindowTitleText" Text="—"
+                                       Style="{StaticResource StatusValue}"/>
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+
                 <!-- ── System status card ────────────────────────────────── -->
                 <Border Style="{StaticResource Card}">
                     <StackPanel>
@@ -97,6 +193,74 @@
                             <TextBlock Text="Database" Style="{StaticResource StatusLabel}"/>
                             <TextBlock x:Name="DatabaseStatus" Text="—" Style="{StaticResource StatusValue}"/>
                         </StackPanel>
+                    </StackPanel>
+                </Border>
+
+                <!-- ── Storage paths card ─────────────────────────────── -->
+                <Border Style="{StaticResource Card}">
+                    <StackPanel>
+                        <TextBlock Text="Storage Paths" Style="{StaticResource SectionHeader}"/>
+
+                        <!-- Mode -->
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
+                            <Ellipse x:Name="StorageModeDot" Width="10" Height="10"
+                                     Fill="{StaticResource NeutralBrush}"
+                                     Margin="0,0,8,0" VerticalAlignment="Center"/>
+                            <TextBlock Text="Mode" Style="{StaticResource StatusLabel}"/>
+                            <TextBlock x:Name="StorageModeText" Text="—"
+                                       FontWeight="SemiBold"
+                                       Style="{StaticResource StatusValue}"/>
+                        </StackPanel>
+
+                        <!-- Data folder -->
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+                            <TextBlock Width="18" Margin="0,0,8,0"/>
+                            <TextBlock Text="Data / DB" Style="{StaticResource StatusLabel}"/>
+                            <TextBlock x:Name="StorageDataPathText" Text="—"
+                                       FontSize="11" FontFamily="Consolas"
+                                       Foreground="#424242" VerticalAlignment="Center"
+                                       TextWrapping="Wrap"/>
+                        </StackPanel>
+
+                        <!-- Cache folder -->
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+                            <TextBlock Width="18" Margin="0,0,8,0"/>
+                            <TextBlock Text="Cache" Style="{StaticResource StatusLabel}"/>
+                            <TextBlock x:Name="StorageCachePathText" Text="—"
+                                       FontSize="11" FontFamily="Consolas"
+                                       Foreground="#424242" VerticalAlignment="Center"
+                                       TextWrapping="Wrap"/>
+                        </StackPanel>
+
+                        <!-- Artifacts folder -->
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+                            <TextBlock Width="18" Margin="0,0,8,0"/>
+                            <TextBlock Text="Artifacts" Style="{StaticResource StatusLabel}"/>
+                            <TextBlock x:Name="StorageArtifactPathText" Text="—"
+                                       FontSize="11" FontFamily="Consolas"
+                                       Foreground="#424242" VerticalAlignment="Center"
+                                       TextWrapping="Wrap"/>
+                        </StackPanel>
+
+                        <!-- Database file -->
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+                            <TextBlock Width="18" Margin="0,0,8,0"/>
+                            <TextBlock Text="Database" Style="{StaticResource StatusLabel}"/>
+                            <TextBlock x:Name="StorageDatabasePathText" Text="—"
+                                       FontSize="11" FontFamily="Consolas"
+                                       Foreground="#424242" VerticalAlignment="Center"
+                                       TextWrapping="Wrap"/>
+                        </StackPanel>
+
+                        <!-- Selection reason -->
+                        <Border x:Name="StorageReasonBanner"
+                                Background="#F3F8FF" BorderBrush="#90CAF9" BorderThickness="1"
+                                CornerRadius="4" Padding="10,5" Margin="0,8,0,0"
+                                Visibility="Collapsed">
+                            <TextBlock x:Name="StorageDataReasonText"
+                                       FontSize="11" Foreground="#1565C0"
+                                       TextWrapping="Wrap"/>
+                        </Border>
                     </StackPanel>
                 </Border>
 
@@ -215,6 +379,167 @@
                             <TextBlock Text="⚠ No AI providers are available. Configure Ollama or an OpenAI API key to enable AI features."
                                        FontSize="11" Foreground="#B71C1C"
                                        TextWrapping="Wrap"/>
+                        </Border>
+                    </StackPanel>
+                </Border>
+
+                <!-- ── Audio Capture card ────────────────────────────────── -->
+                <Border Style="{StaticResource Card}">
+                    <StackPanel>
+                        <TextBlock Text="Audio Capture" Style="{StaticResource SectionHeader}"/>
+
+                        <!-- Microphone status -->
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+                            <Ellipse x:Name="MicDot" Width="10" Height="10"
+                                     Fill="{StaticResource NeutralBrush}"
+                                     Margin="0,0,8,0" VerticalAlignment="Center"/>
+                            <TextBlock Text="Microphone" Style="{StaticResource StatusLabel}"/>
+                            <TextBlock x:Name="MicStatusText" Text="Idle"
+                                       Style="{StaticResource StatusValue}"/>
+                        </StackPanel>
+
+                        <!-- Microphone device name -->
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                            <TextBlock Width="18" Margin="0,0,8,0"/>
+                            <TextBlock Text="Device" Style="{StaticResource StatusLabel}"/>
+                            <TextBlock x:Name="MicDeviceText" Text="—"
+                                       FontSize="11" FontFamily="Consolas"
+                                       Foreground="#616161" VerticalAlignment="Center"
+                                       TextWrapping="Wrap"/>
+                        </StackPanel>
+
+                        <!-- System audio status -->
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+                            <Ellipse x:Name="SystemAudioDot" Width="10" Height="10"
+                                     Fill="{StaticResource NeutralBrush}"
+                                     Margin="0,0,8,0" VerticalAlignment="Center"/>
+                            <TextBlock Text="System Audio" Style="{StaticResource StatusLabel}"/>
+                            <TextBlock x:Name="SystemAudioStatusText" Text="Not available"
+                                       Style="{StaticResource StatusValue}"/>
+                        </StackPanel>
+
+                        <!-- System audio device name -->
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                            <TextBlock Width="18" Margin="0,0,8,0"/>
+                            <TextBlock Text="Device" Style="{StaticResource StatusLabel}"/>
+                            <TextBlock x:Name="SystemAudioDeviceText" Text="—"
+                                       FontSize="11" FontFamily="Consolas"
+                                       Foreground="#616161" VerticalAlignment="Center"
+                                       TextWrapping="Wrap"/>
+                        </StackPanel>
+
+                        <!-- Transcription status -->
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+                            <Ellipse x:Name="TranscriptionDot" Width="10" Height="10"
+                                     Fill="{StaticResource NeutralBrush}"
+                                     Margin="0,0,8,0" VerticalAlignment="Center"/>
+                            <TextBlock Text="Transcription" Style="{StaticResource StatusLabel}"/>
+                            <TextBlock x:Name="TranscriptionStatusText" Text="Idle"
+                                       Style="{StaticResource StatusValue}"/>
+                        </StackPanel>
+
+                        <!-- Transcription provider/model -->
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+                            <TextBlock Width="18" Margin="0,0,8,0"/>
+                            <TextBlock Text="Provider / Model" Style="{StaticResource StatusLabel}"/>
+                            <TextBlock x:Name="TranscriptionProviderText" Text="—"
+                                       FontSize="11" FontFamily="Consolas"
+                                       Foreground="#616161" VerticalAlignment="Center"/>
+                        </StackPanel>
+
+                        <!-- Whisper model download state -->
+                        <StackPanel x:Name="WhisperDownloadStatePanel"
+                                    Orientation="Horizontal" Margin="0,0,0,4"
+                                    Visibility="Collapsed">
+                            <TextBlock Width="18" Margin="0,0,8,0"/>
+                            <TextBlock Text="Model state" Style="{StaticResource StatusLabel}"/>
+                            <TextBlock x:Name="WhisperDownloadStateText" Text="—"
+                                       FontSize="11" FontFamily="Consolas"
+                                       Foreground="#616161" VerticalAlignment="Center"/>
+                        </StackPanel>
+
+                        <!-- Whisper local model path -->
+                        <StackPanel x:Name="WhisperModelPathPanel"
+                                    Orientation="Horizontal" Margin="0,0,0,4"
+                                    Visibility="Collapsed">
+                            <TextBlock Width="18" Margin="0,0,8,0"/>
+                            <TextBlock Text="Model path" Style="{StaticResource StatusLabel}"/>
+                            <TextBlock x:Name="WhisperModelPathText" Text="—"
+                                       FontSize="11" FontFamily="Consolas"
+                                       Foreground="#616161" VerticalAlignment="Center"
+                                       TextWrapping="Wrap" MaxWidth="340"/>
+                        </StackPanel>
+
+                        <!-- Queue length -->
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+                            <TextBlock Width="18" Margin="0,0,8,0"/>
+                            <TextBlock Text="Queue" Style="{StaticResource StatusLabel}"/>
+                            <TextBlock x:Name="TranscriptionQueueText" Text="0 chunks"
+                                       FontSize="11" FontFamily="Consolas"
+                                       Foreground="#616161" VerticalAlignment="Center"/>
+                        </StackPanel>
+
+                        <!-- Last transcript time -->
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+                            <TextBlock Width="18" Margin="0,0,8,0"/>
+                            <TextBlock Text="Last transcript" Style="{StaticResource StatusLabel}"/>
+                            <TextBlock x:Name="LastTranscriptTimeText" Text="—"
+                                       FontSize="11" FontFamily="Consolas"
+                                       Foreground="#616161" VerticalAlignment="Center"/>
+                        </StackPanel>
+
+                        <!-- Last transcription error (hidden when none) -->
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+                            <TextBlock Width="18" Margin="0,0,8,0"/>
+                            <TextBlock Text="Last error" Style="{StaticResource StatusLabel}"/>
+                            <TextBlock x:Name="LastTranscriptionErrorText" Text="—"
+                                       FontSize="11" Foreground="#C62828"
+                                       VerticalAlignment="Center" TextWrapping="Wrap"/>
+                        </StackPanel>
+
+                        <!-- No transcription provider warning banner -->
+                        <Border x:Name="TranscriptionNotConfiguredBanner"
+                                Background="#FFEBEE" BorderBrush="#EF9A9A" BorderThickness="1"
+                                CornerRadius="4" Padding="10,6" Margin="0,8,0,0"
+                                Visibility="Collapsed">
+                            <TextBlock x:Name="TranscriptionNotConfiguredText"
+                                       FontSize="11" Foreground="#B71C1C"
+                                       TextWrapping="Wrap"/>
+                        </Border>
+                    </StackPanel>
+                </Border>
+
+                <!-- ── Live Transcript card ───────────────────────────────── -->
+                <Border Style="{StaticResource Card}">
+                    <StackPanel>
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                            <TextBlock Text="Live Transcript"
+                                       Style="{StaticResource SectionHeader}"
+                                       Margin="0"/>
+                            <TextBlock x:Name="TranscriptSegmentCountText"
+                                       Text="(0 segments)"
+                                       FontSize="11" Foreground="#9E9E9E"
+                                       VerticalAlignment="Center" Margin="8,0,0,0"/>
+                        </StackPanel>
+
+                        <!-- Placeholder shown when no segments yet -->
+                        <TextBlock x:Name="TranscriptPlaceholder"
+                                   Text="Transcript will appear here once a session starts and audio is detected."
+                                   FontSize="11" Foreground="#9E9E9E"
+                                   TextWrapping="Wrap" FontStyle="Italic"
+                                   Margin="0,0,0,4"/>
+
+                        <!-- Scrollable segment list — max ~220px tall, shown once segments arrive -->
+                        <Border x:Name="TranscriptListBorder"
+                                BorderBrush="#E0E0E0" BorderThickness="1"
+                                CornerRadius="4" Padding="8,6"
+                                Background="#FAFAFA"
+                                Visibility="Collapsed">
+                            <ScrollViewer x:Name="TranscriptScrollViewer"
+                                          MaxHeight="220"
+                                          VerticalScrollBarVisibility="Auto">
+                                <StackPanel x:Name="TranscriptItemsPanel"/>
+                            </ScrollViewer>
                         </Border>
                     </StackPanel>
                 </Border>

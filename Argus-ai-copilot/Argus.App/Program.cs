@@ -2,8 +2,11 @@ using Argus.AI;
 using Argus.App.Configuration;
 using Argus.App.Diagnostics;
 using Argus.App.Services;
+using Argus.Context;
 using Argus.Core.Contracts.Services;
 using Argus.Infrastructure;
+using Argus.Infrastructure.Storage;
+using Argus.Transcription;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -49,6 +52,9 @@ internal static class Program
                 services.Configure<RoutingOptions>(
                     ctx.Configuration.GetSection(RoutingOptions.SectionName));
 
+                services.Configure<StorageOptions>(
+                    ctx.Configuration.GetSection(StorageOptions.SectionName));
+
                 // ── Infrastructure: SQLite, repositories, artifact storage ─────
                 // DbInitializer is registered inside this call as a hosted service
                 // and will run before SessionCoordinatorService starts.
@@ -56,6 +62,12 @@ internal static class Program
 
                 // ── AI layer: providers, discovery, model selection ────────────
                 services.AddArgusAI(ctx.Configuration);
+
+                // ── Context layer: active window tracking ─────────────────────
+                services.AddArgusContext();
+
+                // ── Audio capture + transcription pipeline ─────────────────────
+                services.AddArgusTranscription();
 
                 // ── Core application services ──────────────────────────────────
                 services.AddSingleton<IAppBootstrapper, AppBootstrapper>();
@@ -75,6 +87,10 @@ internal static class Program
                 // Also registered as IHostedService for the BackgroundService pump.
                 services.AddSingleton<SessionCoordinatorService>();
                 services.AddSingleton<ISessionCoordinator>(
+                    sp => sp.GetRequiredService<SessionCoordinatorService>());
+                services.AddSingleton<ISessionStatePublisher>(
+                    sp => sp.GetRequiredService<SessionCoordinatorService>());
+                services.AddSingleton<IAudioStatusPublisher>(
                     sp => sp.GetRequiredService<SessionCoordinatorService>());
                 services.AddHostedService(
                     sp => sp.GetRequiredService<SessionCoordinatorService>());

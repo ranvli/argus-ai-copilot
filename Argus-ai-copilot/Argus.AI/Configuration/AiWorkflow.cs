@@ -16,5 +16,12 @@ public enum AiWorkflow
     MeetingSummary,
 
     /// <summary>Describe a captured screenshot or active window contents.</summary>
-    ScreenExplain
+    ScreenExplain,
+
+    /// <summary>
+    /// Real-time speech-to-text transcription of captured audio.
+    /// Intentionally separate from RealtimeAssist so transcription can use
+    /// a different provider (e.g. local Whisper) while chat uses Ollama/OpenAI.
+    /// </summary>
+    SpeechTranscription
 }

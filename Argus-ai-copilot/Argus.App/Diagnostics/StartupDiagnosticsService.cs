@@ -35,39 +35,45 @@ public sealed class StartupDiagnosticsService : IHostedService, IStartupDiagnost
         IOptions<RoutingOptions> routingOptions,
         ILogger<StartupDiagnosticsService> logger)
     {
-        _pathProvider = pathProvider;
-        _discovery = discovery;
-        _selection = selection;
+        _pathProvider   = pathProvider;
+        _discovery      = discovery;
+        _selection      = selection;
         _routingOptions = routingOptions;
-        _logger = logger;
+        _logger         = logger;
     }
 
     public async Task StartAsync(CancellationToken cancellationToken)
     {
         _logger.LogInformation("StartupDiagnosticsService: beginning diagnostics run.");
 
-        var (storageOk, storageError) = CheckStorage();
-        var (dbOk, dbError) = CheckDatabase();
-        var providerResult = await RunProviderDiscoveryAsync(cancellationToken);
-        var routing = BuildEffectiveRouting(providerResult);
+        var resolved = _pathProvider.ResolvedPaths;
+
+        _logger.LogInformation(
+            "Storage mode: {Mode}. DataRoot={DataRoot}, CacheRoot={CacheRoot}, ArtifactRoot={ArtifactRoot}",
+            resolved.ModeDisplay, resolved.DataRoot, resolved.CacheRoot, resolved.ArtifactRoot);
+
+        var (storageOk, storageError) = CheckStorage(resolved);
+        var (dbOk, dbError)           = CheckDatabase(resolved);
+        var providerResult            = await RunProviderDiscoveryAsync(cancellationToken);
+        var routing                   = BuildEffectiveRouting(providerResult);
 
         var result = new StartupDiagnosticsResult
         {
-            CapturedAt = DateTimeOffset.UtcNow,
-            DataFolderPath = _pathProvider.DataFolder,
-            StorageAvailable = storageOk,
-            StorageError = storageError,
-            DatabasePath = _pathProvider.DatabasePath,
+            CapturedAt        = DateTimeOffset.UtcNow,
+            StoragePaths      = resolved,
+            StorageAvailable  = storageOk,
+            StorageError      = storageError,
             DatabaseAvailable = dbOk,
-            DatabaseError = dbError,
+            DatabaseError     = dbError,
             ProviderDiscovery = providerResult,
-            EffectiveRouting = routing
+            EffectiveRouting  = routing
         };
 
         _result = result;
 
         _logger.LogInformation(
-            "Diagnostics complete. Storage={StorageOk}, DB={DbOk}, Ollama={OllamaStatus}, OpenAI={OpenAiStatus}, RoutingMode={Mode}",
+            "Diagnostics complete. Storage={StorageOk}, DB={DbOk}, " +
+            "Ollama={OllamaStatus}, OpenAI={OpenAiStatus}, RoutingMode={Mode}",
             storageOk, dbOk,
             providerResult.OllamaAvailability,
             providerResult.OpenAiAvailability,
@@ -80,22 +86,14 @@ public sealed class StartupDiagnosticsService : IHostedService, IStartupDiagnost
 
     // ── Storage ───────────────────────────────────────────────────────────────
 
-    private (bool ok, string? error) CheckStorage()
+    private (bool ok, string? error) CheckStorage(ResolvedStoragePaths resolved)
     {
         try
         {
-            var root = _pathProvider.AppDataRoot;
-            if (!Directory.Exists(root))
-            {
-                Directory.CreateDirectory(root);
-                _logger.LogInformation("Created AppData root: {Path}", root);
-            }
-
-            // Write+delete a probe file to confirm write access
-            var probe = Path.Combine(root, ".write-probe");
-            File.WriteAllText(probe, "probe");
-            File.Delete(probe);
-
+            // Probe all three roots
+            ProbeRoot(resolved.DataRoot);
+            ProbeRoot(resolved.CacheRoot);
+            ProbeRoot(resolved.ArtifactRoot);
             return (true, null);
         }
         catch (Exception ex)
@@ -105,15 +103,26 @@ public sealed class StartupDiagnosticsService : IHostedService, IStartupDiagnost
         }
     }
 
+    private void ProbeRoot(string root)
+    {
+        if (!Directory.Exists(root))
+        {
+            Directory.CreateDirectory(root);
+            _logger.LogInformation("Created root directory: {Path}", root);
+        }
+
+        var probe = Path.Combine(root, ".write-probe");
+        File.WriteAllText(probe, "probe");
+        File.Delete(probe);
+    }
+
     // ── Database ──────────────────────────────────────────────────────────────
 
-    private (bool ok, string? error) CheckDatabase()
+    private (bool ok, string? error) CheckDatabase(ResolvedStoragePaths resolved)
     {
         try
         {
-            var dbPath = _pathProvider.DatabasePath;
-            // DbInitializer (earlier hosted service) has already run EnsureCreated/Migrate.
-            // We only verify the file now exists.
+            var dbPath = resolved.DatabasePath;
             return (File.Exists(dbPath), File.Exists(dbPath) ? null : "Database file not found");
         }
         catch (Exception ex)
@@ -134,11 +143,10 @@ public sealed class StartupDiagnosticsService : IHostedService, IStartupDiagnost
         catch (Exception ex)
         {
             _logger.LogError(ex, "Provider discovery threw an unexpected exception.");
-            // Return a safe empty result rather than crashing startup
             return new ProviderDiscoveryResult
             {
                 OllamaAvailability = ProviderAvailability.Error,
-                OllamaError = ex.Message,
+                OllamaError        = ex.Message,
                 OpenAiAvailability = ProviderAvailability.NotConfigured
             };
         }
@@ -160,3 +168,4 @@ public sealed class StartupDiagnosticsService : IHostedService, IStartupDiagnost
         }
     }
 }
+
