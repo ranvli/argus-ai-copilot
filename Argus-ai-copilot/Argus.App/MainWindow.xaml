@@ -509,6 +509,54 @@
                     </StackPanel>
                 </Border>
 
+                <!-- ── Argus Assistant card ──────────────────────────────────── -->
+                <Border x:Name="AssistantCard"
+                        Style="{StaticResource Card}"
+                        Visibility="Collapsed">
+                    <StackPanel>
+                        <TextBlock Text="Argus Assistant"
+                                   Style="{StaticResource SectionHeader}"
+                                   Margin="0,0,0,8"/>
+
+                        <!-- Wake phrase -->
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+                            <TextBlock Width="18" Margin="0,0,8,0"/>
+                            <TextBlock Text="Wake phrase" Style="{StaticResource StatusLabel}"/>
+                            <TextBlock x:Name="AssistantWakePhraseText" Text="—"
+                                       FontSize="11" FontFamily="Consolas"
+                                       Foreground="#616161" VerticalAlignment="Center"/>
+                        </StackPanel>
+
+                        <!-- Intent -->
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+                            <TextBlock Width="18" Margin="0,0,8,0"/>
+                            <TextBlock Text="Intent" Style="{StaticResource StatusLabel}"/>
+                            <TextBlock x:Name="AssistantIntentText" Text="—"
+                                       FontSize="11" FontFamily="Consolas"
+                                       Foreground="#616161" VerticalAlignment="Center"/>
+                        </StackPanel>
+
+                        <!-- Timestamp -->
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                            <TextBlock Width="18" Margin="0,0,8,0"/>
+                            <TextBlock Text="At" Style="{StaticResource StatusLabel}"/>
+                            <TextBlock x:Name="AssistantTimeText" Text="—"
+                                       FontSize="11" FontFamily="Consolas"
+                                       Foreground="#616161" VerticalAlignment="Center"/>
+                        </StackPanel>
+
+                        <!-- Suggestion -->
+                        <Border Background="#F1F8E9" BorderBrush="#AED581" BorderThickness="1"
+                                CornerRadius="4" Padding="10,8" Margin="0,0,0,0">
+                            <TextBlock x:Name="AssistantSuggestionText"
+                                       FontSize="12"
+                                       Foreground="#212121"
+                                       TextWrapping="Wrap"
+                                       Text="—"/>
+                        </Border>
+                    </StackPanel>
+                </Border>
+
                 <!-- ── Live Transcript card ───────────────────────────────── -->
                 <Border Style="{StaticResource Card}">
                     <StackPanel>

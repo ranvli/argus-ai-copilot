@@ -85,6 +85,9 @@ internal static class Program
                 // ── Session coordinator ────────────────────────────────────────
                 // Singleton so it can be injected as ISessionCoordinator anywhere.
                 // Also registered as IHostedService for the BackgroundService pump.
+                services.AddSingleton<AssistantReactionService>();
+                services.AddSingleton<IAssistantReactionPublisher>(
+                    sp => sp.GetRequiredService<AssistantReactionService>());
                 services.AddSingleton<SessionCoordinatorService>();
                 services.AddSingleton<ISessionCoordinator>(
                     sp => sp.GetRequiredService<SessionCoordinatorService>());

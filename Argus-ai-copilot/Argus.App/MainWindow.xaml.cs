@@ -23,6 +23,7 @@ public partial class MainWindow : Window
     private readonly ISessionCoordinator _coordinator;
     private readonly ISessionStatePublisher _statePublisher;
     private readonly IAudioStatusPublisher _audioPublisher;
+    private readonly IAssistantReactionPublisher _reactionPublisher;
 
     // Ticks every second to refresh the live session duration label.
     private readonly DispatcherTimer _durationTimer;
@@ -46,14 +47,16 @@ public partial class MainWindow : Window
         IStartupDiagnosticsService diagnostics,
         ISessionCoordinator coordinator,
         ISessionStatePublisher statePublisher,
-        IAudioStatusPublisher audioPublisher)
+        IAudioStatusPublisher audioPublisher,
+        IAssistantReactionPublisher reactionPublisher)
     {
-        _logger         = logger;
-        _bootstrapper   = bootstrapper;
-        _diagnostics    = diagnostics;
-        _coordinator    = coordinator;
-        _statePublisher = statePublisher;
-        _audioPublisher = audioPublisher;
+        _logger            = logger;
+        _bootstrapper      = bootstrapper;
+        _diagnostics       = diagnostics;
+        _coordinator       = coordinator;
+        _statePublisher    = statePublisher;
+        _audioPublisher    = audioPublisher;
+        _reactionPublisher = reactionPublisher;
 
         InitializeComponent();
 
@@ -77,9 +80,13 @@ public partial class MainWindow : Window
         // Subscribe to live transcript segments
         _audioPublisher.TranscriptSegmentsReceived += OnTranscriptSegmentsReceived;
 
+        // Subscribe to assistant reactions
+        _reactionPublisher.ReactionChanged += OnReactionChanged;
+
         // Apply the current snapshots immediately
         ApplySnapshot(_statePublisher.Snapshot);
         ApplyAudioStatus(_audioPublisher.AudioStatus);
+        ApplyReaction(_reactionPublisher.Current);
 
         // Diagnostics: apply if already available, otherwise subscribe
         if (_diagnostics.Result is not null)
@@ -193,6 +200,55 @@ public partial class MainWindow : Window
         {
             TranscriptionNotConfiguredBanner.Visibility = Visibility.Collapsed;
         }
+    }
+
+    // -- Assistant reaction ----------------------------------------------------
+
+    private void OnReactionChanged(object? sender, AssistantReactionSnapshot reaction)
+    {
+        Dispatcher.InvokeAsync(() => ApplyReaction(reaction));
+    }
+
+    private void ApplyReaction(AssistantReactionSnapshot reaction)
+    {
+        // Wake phrase
+        AssistantWakePhraseText.Text = string.IsNullOrWhiteSpace(reaction.WakePhrase)
+            ? "—"
+            : $"\"{reaction.WakePhrase}\"";
+
+        // Intent
+        AssistantIntentText.Text = reaction.Intent == Argus.Transcription.Intent.DetectedIntent.None
+            ? "—"
+            : reaction.Intent.ToString();
+
+        // Suggestion or error
+        if (reaction.IsError)
+        {
+            AssistantSuggestionText.Text       = reaction.ErrorMessage ?? "Unknown error";
+            AssistantSuggestionText.Foreground = ErrorBrush;
+        }
+        else if (!string.IsNullOrWhiteSpace(reaction.Suggestion))
+        {
+            AssistantSuggestionText.Text       = reaction.Suggestion;
+            AssistantSuggestionText.Foreground = new SolidColorBrush(
+                System.Windows.Media.Color.FromRgb(0x21, 0x21, 0x21));
+        }
+        else
+        {
+            AssistantSuggestionText.Text       = "—";
+            AssistantSuggestionText.Foreground = NeutralBrush;
+        }
+
+        // Timestamp
+        AssistantTimeText.Text = reaction.At.HasValue
+            ? reaction.At.Value.ToLocalTime().ToString("HH:mm:ss")
+            : "—";
+
+        // Show the card once there's been at least one interaction
+        AssistantCard.Visibility = reaction.Intent != Argus.Transcription.Intent.DetectedIntent.None
+                                   || reaction.IsError
+            ? Visibility.Visible
+            : Visibility.Collapsed;
     }
 
     // -- Live transcript -------------------------------------------------------

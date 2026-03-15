@@ -6,6 +6,7 @@ using Argus.Core.Contracts.Services;
 using Argus.Core.Domain.Entities;
 using Argus.Core.Domain.Enums;
 using Argus.Infrastructure.Storage;
+using Argus.Transcription.Intent;
 using Argus.Transcription.Pipeline;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -37,6 +38,9 @@ internal sealed class SessionCoordinatorService
     private readonly IArtifactStorage _artifactStorage;
     private readonly IActiveWindowTracker _windowTracker;
     private readonly IAudioDeviceDiscovery _deviceDiscovery;
+    private readonly TranscriptBuffer _transcriptBuffer;
+    private readonly IntentDetectionService _intentDetector;
+    private readonly AssistantReactionService _assistantReaction;
 
     // All state fields are accessed only via operations serialised through _gate.
     private readonly SemaphoreSlim _gate = new(1, 1);
@@ -83,14 +87,20 @@ internal sealed class SessionCoordinatorService
         IServiceScopeFactory scopeFactory,
         IArtifactStorage artifactStorage,
         IActiveWindowTracker windowTracker,
-        IAudioDeviceDiscovery deviceDiscovery)
+        IAudioDeviceDiscovery deviceDiscovery,
+        TranscriptBuffer transcriptBuffer,
+        IntentDetectionService intentDetector,
+        AssistantReactionService assistantReaction)
     {
-        _logger          = logger;
-        _appState        = appState;
-        _scopeFactory    = scopeFactory;
-        _artifactStorage = artifactStorage;
-        _windowTracker   = windowTracker;
-        _deviceDiscovery = deviceDiscovery;
+        _logger           = logger;
+        _appState         = appState;
+        _scopeFactory     = scopeFactory;
+        _artifactStorage  = artifactStorage;
+        _windowTracker    = windowTracker;
+        _deviceDiscovery  = deviceDiscovery;
+        _transcriptBuffer = transcriptBuffer;
+        _intentDetector   = intentDetector;
+        _assistantReaction = assistantReaction;
     }
 
     // ── BackgroundService ─────────────────────────────────────────────────────
@@ -175,6 +185,7 @@ internal sealed class SessionCoordinatorService
             _activeSession          = session;
             _sessionEventCount      = 1;
             _transcriptSegmentCount = 0;
+            _transcriptBuffer.Clear();
 
             await TransitionAsync(SessionLifecycleState.Listening, session, ct);
             _appState.StartListening();
@@ -535,6 +546,13 @@ internal sealed class SessionCoordinatorService
         if (_activeSession is null) return;
 
         _transcriptSegmentCount += segments.Count;
+
+        // Push to rolling buffer and check for intent
+        _transcriptBuffer.Push(segments);
+        var recentText = _transcriptBuffer.GetRecentText(10);
+        var intent     = _intentDetector.Detect(recentText);
+        if (intent.HasIntent)
+            _assistantReaction.OnIntentDetected(intent, recentText);
 
         // Persist each segment and publish to UI via snapshot update
         _ = PersistSegmentsAsync(segments);
