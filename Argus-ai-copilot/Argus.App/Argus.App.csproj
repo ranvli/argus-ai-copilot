@@ -1,0 +1,43 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <!--
+      UseWindowsForms is enabled ONLY to access System.Windows.Forms.NotifyIcon.
+      All WinForms types are fully contained inside Services/TrayService.cs.
+      No other file in this project references System.Windows.Forms.
+    -->
+    <UseWindowsForms>true</UseWindowsForms>
+    <RootNamespace>Argus.App</RootNamespace>
+    <AssemblyName>Argus.App</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Argus.Core\Argus.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
+      Single package pulls in everything needed:
+        Microsoft.Extensions.DependencyInjection
+        Microsoft.Extensions.Configuration  (+ JSON, EnvVars, CommandLine)
+        Microsoft.Extensions.Logging        (+ Console, Debug providers)
+        Microsoft.Extensions.Hosting.Abstractions
+    -->
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="appsettings.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Update="appsettings.Development.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+</Project>

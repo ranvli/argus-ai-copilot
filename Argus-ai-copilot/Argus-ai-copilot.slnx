@@ -1,0 +1,12 @@
+<Solution>
+  <Project Path="Argus.AI/Argus.AI.csproj" />
+  <Project Path="Argus.Audio/Argus.Audio.csproj" />
+  <Project Path="Argus.Automation/Argus.Automation.csproj" />
+  <Project Path="Argus.Context/Argus.Context.csproj" />
+  <Project Path="Argus.Core/Argus.Core.csproj" />
+  <Project Path="Argus.Infrastructure/Argus.Infrastructure.csproj" />
+  <Project Path="Argus.Memory/Argus.Memory.csproj" />
+  <Project Path="Argus.Transcription/Argus.Transcription.csproj" />
+  <Project Path="Argus.Vision/Argus.Vision.csproj" />
+  <Project Path="Argus.App/Argus.App.csproj" />
+</Solution>
