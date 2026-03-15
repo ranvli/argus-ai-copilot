@@ -18,6 +18,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Argus.Core\Argus.Core.csproj" />
+    <ProjectReference Include="..\Argus.Infrastructure\Argus.Infrastructure.csproj" />
   </ItemGroup>
 
   <ItemGroup>

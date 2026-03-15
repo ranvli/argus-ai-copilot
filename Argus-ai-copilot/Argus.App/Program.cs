@@ -1,5 +1,7 @@
 using Argus.App.Configuration;
 using Argus.App.Services;
+using Argus.Core.Contracts.Services;
+using Argus.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -17,13 +19,9 @@ internal static class Program
         Host.CreateDefaultBuilder()
 
             // ── Configuration ─────────────────────────────────────────────────
-            // CreateDefaultBuilder already adds:
-            //   appsettings.json, appsettings.{Environment}.json,
-            //   environment variables, and command-line args.
             .ConfigureAppConfiguration((ctx, cfg) =>
             {
-                // Add extra sources here when needed.
-                // Example: cfg.AddUserSecrets<App>();
+                // Additional sources (user secrets, key vault, etc.) go here.
             })
 
             // ── Logging ───────────────────────────────────────────────────────
@@ -46,6 +44,11 @@ internal static class Program
                 services.Configure<ProvidersOptions>(
                     ctx.Configuration.GetSection(ProvidersOptions.SectionName));
 
+                // ── Infrastructure: SQLite, repositories, artifact storage ─────
+                // DbInitializer is registered inside this call as a hosted service
+                // and will run before SessionCoordinatorService starts.
+                services.AddArgusInfrastructure();
+
                 // ── Core application services ──────────────────────────────────
                 services.AddSingleton<IAppBootstrapper, AppBootstrapper>();
 
@@ -53,15 +56,20 @@ internal static class Program
                 services.AddSingleton<IAppStateService, AppStateService>();
 
                 // ── System-tray ────────────────────────────────────────────────
-                // Registered as both ITrayService (for injection by other services)
-                // and IHostedService (for host lifecycle). A single instance is
-                // shared via the factory delegate — no duplicate construction.
+                // Registered as both ITrayService and IHostedService.
+                // A single instance is shared via the factory delegate.
                 services.AddSingleton<TrayService>();
                 services.AddSingleton<ITrayService>(sp => sp.GetRequiredService<TrayService>());
                 services.AddHostedService(sp => sp.GetRequiredService<TrayService>());
 
-                // ── Background session coordinator ─────────────────────────────
-                services.AddHostedService<SessionCoordinatorService>();
+                // ── Session coordinator ────────────────────────────────────────
+                // Singleton so it can be injected as ISessionCoordinator anywhere.
+                // Also registered as IHostedService for the BackgroundService pump.
+                services.AddSingleton<SessionCoordinatorService>();
+                services.AddSingleton<ISessionCoordinator>(
+                    sp => sp.GetRequiredService<SessionCoordinatorService>());
+                services.AddHostedService(
+                    sp => sp.GetRequiredService<SessionCoordinatorService>());
 
                 // ── Application windows ────────────────────────────────────────
                 services.AddSingleton<MainWindow>();
