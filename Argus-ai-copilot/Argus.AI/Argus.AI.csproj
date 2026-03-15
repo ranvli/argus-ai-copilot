@@ -7,6 +7,19 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!--
+      Logging.Abstractions  → ILogger<T>
+      Http                  → IHttpClientFactory, AddHttpClient()
+      Options.Abstractions  → IOptions<T>
+      DI.Abstractions       → IServiceCollection
+    -->
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Http" Version="10.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Options" Version="10.0.0" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\Argus.Core\Argus.Core.csproj" />
   </ItemGroup>
 
