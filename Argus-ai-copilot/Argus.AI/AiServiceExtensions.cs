@@ -1,7 +1,9 @@
 using Argus.AI.Configuration;
+using Argus.AI.Discovery;
 using Argus.AI.Implementations;
 using Argus.AI.Providers;
 using Argus.AI.Resolvers;
+using Argus.AI.Selection;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
@@ -65,6 +67,10 @@ public static class AiServiceExtensions
 
         // ── Model resolver (singleton — caches instances per profile) ─────────
         services.AddSingleton<IModelResolver, ModelResolver>();
+
+        // ── Provider discovery + model selection ──────────────────────────────
+        services.AddTransient<IProviderDiscoveryService, ProviderDiscoveryService>();
+        services.AddSingleton<IModelSelectionService, ModelSelectionService>();
 
         return services;
     }

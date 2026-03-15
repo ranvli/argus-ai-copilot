@@ -5,13 +5,228 @@
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:local="clr-namespace:Argus.App"
         mc:Ignorable="d"
-        Title="Argus AI Copilot" Height="450" Width="800"
-        WindowStartupLocation="CenterScreen">
-    <Grid>
-        <TextBlock Text="Argus AI Copilot — ready."
-                   HorizontalAlignment="Center"
-                   VerticalAlignment="Center"
-                   FontSize="20"
-                   Foreground="#555555" />
+        Title="Argus AI Copilot" Height="580" Width="820"
+        MinWidth="680" MinHeight="520"
+        WindowStartupLocation="CenterScreen"
+        Background="#F5F5F5">
+
+    <Window.Resources>
+        <!-- Status dot colours -->
+        <SolidColorBrush x:Key="OkBrush"      Color="#2E7D32"/>
+        <SolidColorBrush x:Key="WarnBrush"    Color="#F57C00"/>
+        <SolidColorBrush x:Key="ErrorBrush"   Color="#C62828"/>
+        <SolidColorBrush x:Key="InfoBrush"    Color="#1565C0"/>
+        <SolidColorBrush x:Key="NeutralBrush" Color="#757575"/>
+
+        <!-- Section header style -->
+        <Style x:Key="SectionHeader" TargetType="TextBlock">
+            <Setter Property="FontSize"   Value="11"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Foreground" Value="#424242"/>
+            <Setter Property="Margin"     Value="0,0,0,6"/>
+        </Style>
+
+        <!-- Card panel style -->
+        <Style x:Key="Card" TargetType="Border">
+            <Setter Property="Background"      Value="White"/>
+            <Setter Property="CornerRadius"    Value="6"/>
+            <Setter Property="Padding"         Value="14,10"/>
+            <Setter Property="Margin"          Value="0,0,0,10"/>
+            <Setter Property="BorderBrush"     Value="#E0E0E0"/>
+            <Setter Property="BorderThickness" Value="1"/>
+        </Style>
+
+        <!-- Status row label -->
+        <Style x:Key="StatusLabel" TargetType="TextBlock">
+            <Setter Property="FontSize"   Value="12"/>
+            <Setter Property="Foreground" Value="#616161"/>
+            <Setter Property="Width"      Value="130"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+        </Style>
+
+        <!-- Status row value -->
+        <Style x:Key="StatusValue" TargetType="TextBlock">
+            <Setter Property="FontSize"   Value="12"/>
+            <Setter Property="Foreground" Value="#212121"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+            <Setter Property="TextWrapping" Value="Wrap"/>
+        </Style>
+    </Window.Resources>
+
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>   <!-- title bar -->
+            <RowDefinition Height="*"/>      <!-- content -->
+            <RowDefinition Height="Auto"/>   <!-- footer -->
+        </Grid.RowDefinitions>
+
+        <!-- ── Title ─────────────────────────────────────────────────────── -->
+        <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,14">
+            <TextBlock Text="Argus AI Copilot"
+                       FontSize="20" FontWeight="SemiBold"
+                       Foreground="#212121" VerticalAlignment="Center"/>
+            <TextBlock x:Name="DiagnosticsTimestamp"
+                       Text="Checking…"
+                       FontSize="11" Foreground="#9E9E9E"
+                       VerticalAlignment="Center" Margin="12,2,0,0"/>
+        </StackPanel>
+
+        <!-- ── Scrollable content ────────────────────────────────────────── -->
+        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+            <StackPanel>
+
+                <!-- ── System status card ────────────────────────────────── -->
+                <Border Style="{StaticResource Card}">
+                    <StackPanel>
+                        <TextBlock Text="System Status" Style="{StaticResource SectionHeader}"/>
+
+                        <!-- Storage -->
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
+                            <Ellipse x:Name="StorageDot" Width="10" Height="10"
+                                     Fill="{StaticResource NeutralBrush}"
+                                     Margin="0,0,8,0" VerticalAlignment="Center"/>
+                            <TextBlock Text="Local Storage" Style="{StaticResource StatusLabel}"/>
+                            <TextBlock x:Name="StorageStatus" Text="—" Style="{StaticResource StatusValue}"/>
+                        </StackPanel>
+
+                        <!-- Database -->
+                        <StackPanel Orientation="Horizontal">
+                            <Ellipse x:Name="DatabaseDot" Width="10" Height="10"
+                                     Fill="{StaticResource NeutralBrush}"
+                                     Margin="0,0,8,0" VerticalAlignment="Center"/>
+                            <TextBlock Text="Database" Style="{StaticResource StatusLabel}"/>
+                            <TextBlock x:Name="DatabaseStatus" Text="—" Style="{StaticResource StatusValue}"/>
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+
+                <!-- ── Providers card ─────────────────────────────────────── -->
+                <Border Style="{StaticResource Card}">
+                    <StackPanel>
+                        <TextBlock Text="AI Providers" Style="{StaticResource SectionHeader}"/>
+
+                        <!-- Ollama -->
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
+                            <Ellipse x:Name="OllamaDot" Width="10" Height="10"
+                                     Fill="{StaticResource NeutralBrush}"
+                                     Margin="0,0,8,0" VerticalAlignment="Center"/>
+                            <TextBlock Text="Ollama (local)" Style="{StaticResource StatusLabel}"/>
+                            <TextBlock x:Name="OllamaStatus" Text="—" Style="{StaticResource StatusValue}"/>
+                        </StackPanel>
+
+                        <!-- OpenAI -->
+                        <StackPanel Orientation="Horizontal">
+                            <Ellipse x:Name="OpenAiDot" Width="10" Height="10"
+                                     Fill="{StaticResource NeutralBrush}"
+                                     Margin="0,0,8,0" VerticalAlignment="Center"/>
+                            <TextBlock Text="OpenAI (cloud)" Style="{StaticResource StatusLabel}"/>
+                            <TextBlock x:Name="OpenAiStatus" Text="—" Style="{StaticResource StatusValue}"/>
+                        </StackPanel>
+
+                        <!-- Ollama warning -->
+                        <Border x:Name="OllamaWarningBanner"
+                                Background="#FFF8E1" BorderBrush="#FFD54F" BorderThickness="1"
+                                CornerRadius="4" Padding="10,6" Margin="0,10,0,0"
+                                Visibility="Collapsed">
+                            <TextBlock x:Name="OllamaWarningText"
+                                       Text="⚠ Ollama is not running. Start Ollama to enable local AI."
+                                       FontSize="11" Foreground="#E65100"
+                                       TextWrapping="Wrap"/>
+                        </Border>
+                    </StackPanel>
+                </Border>
+
+                <!-- ── Routing card ───────────────────────────────────────── -->
+                <Border Style="{StaticResource Card}">
+                    <StackPanel>
+                        <TextBlock Text="Model Routing" Style="{StaticResource SectionHeader}"/>
+
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
+                            <TextBlock Text="Routing mode" Style="{StaticResource StatusLabel}"/>
+                            <TextBlock x:Name="RoutingModeText" Text="—"
+                                       FontWeight="SemiBold"
+                                       Style="{StaticResource StatusValue}"/>
+                        </StackPanel>
+
+                        <!-- Per-workflow rows -->
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="140"/>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="80"/>
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+
+                            <!-- Header row -->
+                            <TextBlock Grid.Row="0" Grid.Column="0" Text="Workflow"
+                                       FontSize="10" FontWeight="SemiBold" Foreground="#9E9E9E"
+                                       Margin="0,0,0,4"/>
+                            <TextBlock Grid.Row="0" Grid.Column="1" Text="Effective model"
+                                       FontSize="10" FontWeight="SemiBold" Foreground="#9E9E9E"
+                                       Margin="0,0,0,4"/>
+                            <TextBlock Grid.Row="0" Grid.Column="2" Text="Status"
+                                       FontSize="10" FontWeight="SemiBold" Foreground="#9E9E9E"
+                                       Margin="0,0,0,4"/>
+
+                            <!-- RealtimeAssist -->
+                            <TextBlock Grid.Row="1" Grid.Column="0" Text="Realtime Assist"
+                                       Style="{StaticResource StatusLabel}" Margin="0,3"/>
+                            <TextBlock x:Name="RealtimeAssistModel" Grid.Row="1" Grid.Column="1"
+                                       Text="—" Style="{StaticResource StatusValue}" Margin="0,3"/>
+                            <TextBlock x:Name="RealtimeAssistState" Grid.Row="1" Grid.Column="2"
+                                       Text="—" FontSize="11" VerticalAlignment="Center" Margin="0,3"/>
+
+                            <!-- MemoryQuery -->
+                            <TextBlock Grid.Row="2" Grid.Column="0" Text="Memory Query"
+                                       Style="{StaticResource StatusLabel}" Margin="0,3"/>
+                            <TextBlock x:Name="MemoryQueryModel" Grid.Row="2" Grid.Column="1"
+                                       Text="—" Style="{StaticResource StatusValue}" Margin="0,3"/>
+                            <TextBlock x:Name="MemoryQueryState" Grid.Row="2" Grid.Column="2"
+                                       Text="—" FontSize="11" VerticalAlignment="Center" Margin="0,3"/>
+
+                            <!-- MeetingSummary -->
+                            <TextBlock Grid.Row="3" Grid.Column="0" Text="Meeting Summary"
+                                       Style="{StaticResource StatusLabel}" Margin="0,3"/>
+                            <TextBlock x:Name="MeetingSummaryModel" Grid.Row="3" Grid.Column="1"
+                                       Text="—" Style="{StaticResource StatusValue}" Margin="0,3"/>
+                            <TextBlock x:Name="MeetingSummaryState" Grid.Row="3" Grid.Column="2"
+                                       Text="—" FontSize="11" VerticalAlignment="Center" Margin="0,3"/>
+
+                            <!-- ScreenExplain -->
+                            <TextBlock Grid.Row="4" Grid.Column="0" Text="Screen Explain"
+                                       Style="{StaticResource StatusLabel}" Margin="0,3"/>
+                            <TextBlock x:Name="ScreenExplainModel" Grid.Row="4" Grid.Column="1"
+                                       Text="—" Style="{StaticResource StatusValue}" Margin="0,3"/>
+                            <TextBlock x:Name="ScreenExplainState" Grid.Row="4" Grid.Column="2"
+                                       Text="—" FontSize="11" VerticalAlignment="Center" Margin="0,3"/>
+                        </Grid>
+
+                        <!-- No providers warning -->
+                        <Border x:Name="NoProvidersBanner"
+                                Background="#FFEBEE" BorderBrush="#EF9A9A" BorderThickness="1"
+                                CornerRadius="4" Padding="10,6" Margin="0,10,0,0"
+                                Visibility="Collapsed">
+                            <TextBlock Text="⚠ No AI providers are available. Configure Ollama or an OpenAI API key to enable AI features."
+                                       FontSize="11" Foreground="#B71C1C"
+                                       TextWrapping="Wrap"/>
+                        </Border>
+                    </StackPanel>
+                </Border>
+
+            </StackPanel>
+        </ScrollViewer>
+
+        <!-- ── Footer ────────────────────────────────────────────────────── -->
+        <TextBlock Grid.Row="2"
+                   x:Name="FooterText"
+                   Text="Argus AI Copilot — minimises to tray."
+                   FontSize="10" Foreground="#9E9E9E"
+                   HorizontalAlignment="Right" Margin="0,8,0,0"/>
     </Grid>
 </Window>
