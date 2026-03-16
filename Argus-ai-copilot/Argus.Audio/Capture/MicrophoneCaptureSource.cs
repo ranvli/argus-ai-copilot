@@ -1,12 +1,22 @@
+using Argus.Audio.Diagnostics;
 using Microsoft.Extensions.Logging;
 using NAudio.CoreAudioApi;
 using NAudio.Wave;
+using NAudio.Wave.SampleProviders;
 
 namespace Argus.Audio.Capture;
 
 /// <summary>
 /// Captures microphone audio using WASAPI shared mode.
-/// Audio is resampled to 16 kHz mono 16-bit PCM — the format Whisper expects.
+/// Audio is converted to 16 kHz mono 16-bit PCM — the format Whisper expects.
+///
+/// Conversion uses a fully-managed chain (no MediaFoundation dependency):
+///   WasapiCapture (native: usually IeeeFloat 48kHz stereo)
+///   → BufferedWaveProvider
+///   → WaveToSampleProvider  (handles both IeeeFloat and PCM input → float32 ISampleProvider)
+///   → StereoToMonoSampleProvider  (only when native is stereo)
+///   → WdlResamplingSampleProvider (16 kHz, fully-managed sinc resampler)
+///   → SampleToWaveProvider16      (float32 → int16 PCM, always reliable)
 ///
 /// Call <see cref="SetDevice"/> before <see cref="StartAsync"/> to target a specific
 /// WASAPI device; otherwise the Windows default microphone is used.
@@ -15,8 +25,12 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
 {
     private readonly ILogger<MicrophoneCaptureSource> _logger;
 
-    // Target format: mono 16 kHz 16-bit PCM — optimal for Whisper
-    private static readonly WaveFormat TargetFormat = new(sampleRate: 16_000, channels: 1);
+    // Output: mono 16 kHz 16-bit PCM — Whisper's native format
+    private const int TargetSampleRate = 16_000;
+    private const int TargetChannels   = 1;
+    private const int TargetBitsPerSample = 16;
+    private static readonly WaveFormat Pcm16KFormat =
+        new WaveFormat(TargetSampleRate, TargetBitsPerSample, TargetChannels);
 
     private readonly TimeSpan _chunkDuration;
     private readonly int      _chunkBytes;
@@ -24,13 +38,14 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
     // Optional: set before StartAsync to capture a specific device.
     private MMDevice? _targetDevice;
 
-    private WasapiCapture?            _capture;
-    private BufferedWaveProvider?     _captureBuffer;
-    private MediaFoundationResampler? _resampler;
-    private MemoryStream              _pcmBuffer = new();
-    private Guid                      _sessionId;
-    private volatile bool             _paused;
-    private string?                   _deviceName;
+    private WasapiCapture?        _capture;
+    private BufferedWaveProvider? _captureBuffer;
+    // Managed conversion chain — no MediaFoundation
+    private IWaveProvider?        _pcm16Provider;
+    private MemoryStream          _pcmBuffer = new();
+    private Guid                  _sessionId;
+    private volatile bool         _paused;
+    private string?               _deviceName;
 
     // ── IAudioCaptureSource ───────────────────────────────────────────────────
 
@@ -41,10 +56,10 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
     public MicrophoneCaptureSource(ILogger<MicrophoneCaptureSource> logger, TimeSpan? chunkDuration = null)
     {
         _logger        = logger;
-        _chunkDuration = chunkDuration ?? TimeSpan.FromSeconds(5);
-        _chunkBytes    = TargetFormat.SampleRate
-                       * TargetFormat.Channels
-                       * (TargetFormat.BitsPerSample / 8)
+        _chunkDuration = chunkDuration ?? TimeSpan.FromSeconds(2);
+        _chunkBytes    = TargetSampleRate
+                       * TargetChannels
+                       * (TargetBitsPerSample / 8)
                        * (int)_chunkDuration.TotalSeconds;
     }
 
@@ -91,10 +106,25 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
                 BufferDuration          = TimeSpan.FromSeconds(10)
             };
 
-            _resampler = new MediaFoundationResampler(_captureBuffer, TargetFormat)
-            {
-                ResamplerQuality = 60
-            };
+            // Build a fully-managed conversion chain: no MediaFoundation involved.
+            // Step 1: get a float32 ISampleProvider from whatever native format WASAPI gives us.
+            ISampleProvider sampleProvider = _captureBuffer.ToSampleProvider();
+
+            // Step 2: collapse to mono if the native source is multi-channel.
+            if (nativeFormat.Channels > 1)
+                sampleProvider = new StereoToMonoSampleProvider(sampleProvider);
+
+            // Step 3: resample to 16 kHz using the fully-managed WDL sinc resampler.
+            if (nativeFormat.SampleRate != TargetSampleRate)
+                sampleProvider = new WdlResamplingSampleProvider(sampleProvider, TargetSampleRate);
+
+            // Step 4: convert float32 → int16 PCM.
+            _pcm16Provider = new SampleToWaveProvider16(sampleProvider);
+
+            _logger.LogInformation(
+                "[MicrophoneSource.StartAsync] Conversion chain: {NativeRate}Hz/{NativeBits}bit/{NativeCh}ch → {TargetRate}Hz/16bit/1ch (managed, no MFT)",
+                nativeFormat.SampleRate, nativeFormat.BitsPerSample, nativeFormat.Channels,
+                TargetSampleRate);
 
             _pcmBuffer = new MemoryStream();
 
@@ -130,7 +160,7 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
 
         await Task.Delay(200, CancellationToken.None);
 
-        DrainResampler();
+        DrainConverter();
         FlushBuffer(isFinal: true);
         DisposeCapture();
         Status = AudioCaptureStatus.Idle;
@@ -162,12 +192,12 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
     private void OnDataAvailable(object? sender, WaveInEventArgs e)
     {
         if (_paused || e.BytesRecorded == 0) return;
-        if (_captureBuffer is null || _resampler is null) return;
+        if (_captureBuffer is null || _pcm16Provider is null) return;
 
         try
         {
             _captureBuffer.AddSamples(e.Buffer, 0, e.BytesRecorded);
-            DrainResampler();
+            DrainConverter();
         }
         catch (Exception ex)
         {
@@ -175,12 +205,12 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
         }
     }
 
-    private void DrainResampler()
+    private void DrainConverter()
     {
-        if (_resampler is null) return;
+        if (_pcm16Provider is null) return;
         var temp = new byte[4096];
         int read;
-        while ((read = _resampler.Read(temp, 0, temp.Length)) > 0)
+        while ((read = _pcm16Provider.Read(temp, 0, temp.Length)) > 0)
         {
             _pcmBuffer.Write(temp, 0, read);
             TryEmitChunk();
@@ -228,7 +258,7 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
     {
         if (_pcmBuffer.Length == 0) return;
         var raw         = _pcmBuffer.ToArray();
-        var bytesPerSec = TargetFormat.SampleRate * TargetFormat.Channels * (TargetFormat.BitsPerSample / 8);
+        var bytesPerSec = TargetSampleRate * TargetChannels * (TargetBitsPerSample / 8);
         var duration    = TimeSpan.FromSeconds((double)raw.Length / bytesPerSec);
         if (isFinal && duration >= TimeSpan.FromSeconds(1))
             EmitChunk(raw, duration);
@@ -237,6 +267,18 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
 
     private void EmitChunk(byte[] data, TimeSpan duration)
     {
+        var rms      = AudioChunkDiagnostics.ComputeRms(data);
+        var peak     = AudioChunkDiagnostics.ComputePeak(data);
+        var diagnosis = AudioChunkDiagnostics.Diagnose(rms, peak);
+
+        _logger.LogInformation(
+            "[MicChunk] Source=Microphone Duration={Dur:F2}s Bytes={Bytes} " +
+            "SampleRate={Rate} Channels=1 Format=PCM16 " +
+            "RMS={Rms:F4} Peak={Peak:F4} Signal={Signal}",
+            duration.TotalSeconds, data.Length,
+            TargetSampleRate,
+            rms, peak, diagnosis);
+
         var chunk = new AudioChunk
         {
             SessionId  = _sessionId,
@@ -254,8 +296,8 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
 
     private void DisposeCapture()
     {
-        _resampler?.Dispose();
-        _resampler     = null;
+        // The managed chain providers are not IDisposable — just null the reference.
+        _pcm16Provider = null;
         _captureBuffer = null;
 
         if (_capture is not null)

@@ -3,6 +3,7 @@ using Argus.AI.Configuration;
 using Argus.AI.Models;
 using Argus.AI.Providers;
 using Argus.Audio.Capture;
+using Argus.Audio.Diagnostics;
 using Argus.Core.Domain.Entities;
 using Argus.Core.Domain.Enums;
 using Argus.Core.Domain.ValueObjects;
@@ -31,6 +32,12 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
     private readonly IModelResolver _modelResolver;
     private readonly ILogger<TranscriptionPipeline> _logger;
     private readonly WhisperModelService? _whisperModelService;
+
+    // Debug artifact writer: saves the exact WAV payload sent to Whisper for manual inspection.
+    // Files are written to %LocalAppData%\ArgusAI\debug\audio\ (or AppData\debug\audio\).
+    private readonly string _debugAudioFolder;
+    private static readonly bool DebugAudioEnabled = true;  // set false to disable after diagnosis
+    private int _debugFileIndex;
 
     // Capture sources â€” injected by the coordinator after device discovery.
     private MicrophoneCaptureSource?  _mic;
@@ -71,6 +78,17 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
         _modelResolver       = modelResolver;
         _logger              = logger;
         _whisperModelService = whisperModelService;
+
+        // Resolve debug folder: %LocalAppData%\ArgusAI\debug\audio\
+        var appData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        _debugAudioFolder = Path.Combine(appData, "ArgusAI", "debug", "audio");
+        if (DebugAudioEnabled)
+        {
+            Directory.CreateDirectory(_debugAudioFolder);
+            _logger.LogInformation(
+                "[Pipeline.Debug] Debug audio artifacts will be written to: {Folder}",
+                _debugAudioFolder);
+        }
     }
 
     /// <summary>
@@ -335,6 +353,40 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
 
         try
         {
+            // ── Per-chunk diagnostics ───────────────────────────────────────────
+            var rms      = AudioChunkDiagnostics.ComputeRms(chunk.Data);
+            var peak     = AudioChunkDiagnostics.ComputePeak(chunk.Data);
+            var diagnosis = AudioChunkDiagnostics.Diagnose(rms, peak);
+
+            _logger.LogInformation(
+                "[Pipeline.ChunkDiag] ChunkId={Id} Source={Source} Duration={Dur:F2}s " +
+                "Bytes={Bytes} SampleRate=16000 Channels=1 Format=PCM16 " +
+                "RMS={Rms:F4} Peak={Peak:F4} Signal=[{Signal}]",
+                chunk.Id, chunk.Source, chunk.Duration.TotalSeconds,
+                chunk.Data.Length, rms, peak, diagnosis);
+
+            if (peak < 0.002f)
+            {
+                _logger.LogWarning(
+                    "[Pipeline.ChunkDiag] SILENT CHUNK — peak={Peak:F4} is effectively zero. " +
+                    "Audio conversion may be broken. Check log for '[MicChunk]' or '[SysChunk]' entries above.",
+                    peak);
+            }
+
+            // ── Write debug WAV artifact (exact payload going to Whisper) ──────────
+            if (DebugAudioEnabled)
+            {
+                var idx        = System.Threading.Interlocked.Increment(ref _debugFileIndex);
+                var sourceName = chunk.Source == AudioSource.Microphone ? "mic" : "sys";
+                var debugFile  = Path.Combine(
+                    _debugAudioFolder,
+                    $"{sourceName}_{idx:D4}_{DateTimeOffset.UtcNow:HHmmss}_{rms:F3}.wav");
+                WriteWav(debugFile, chunk.Data);
+                _logger.LogInformation(
+                    "[Pipeline.Debug] Saved debug WAV: {File}  (RMS={Rms:F4} Peak={Peak:F4})",
+                    debugFile, rms, peak);
+            }
+
             PublishStatus(transcriptionStatus: TranscriptionPipelineStatus.Transcribing);
             WriteWav(tempFile, chunk.Data);
 
