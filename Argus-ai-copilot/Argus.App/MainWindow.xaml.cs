@@ -25,6 +25,7 @@ public partial class MainWindow : Window
     private readonly IAudioStatusPublisher _audioPublisher;
     private readonly IAssistantReactionPublisher _reactionPublisher;
     private readonly MicAudioSettings _micSettings;
+    private readonly RawMicDiagnosticRecorder _rawMicDiagnosticRecorder;
 
     // Ticks every second to refresh the live session duration label.
     private readonly DispatcherTimer _durationTimer;
@@ -35,6 +36,7 @@ public partial class MainWindow : Window
     // Running count of segments shown (for the cap check).
     private int _displayedSegments;
     private const int MaxDisplayedSegments = 50;
+    private bool _rawMicRecordingInProgress;
 
     private static readonly SolidColorBrush OkBrush      = new(System.Windows.Media.Color.FromRgb(0x2E, 0x7D, 0x32));
     private static readonly SolidColorBrush WarnBrush    = new(System.Windows.Media.Color.FromRgb(0xF5, 0x7C, 0x00));
@@ -60,6 +62,7 @@ public partial class MainWindow : Window
         _audioPublisher    = audioPublisher;
         _reactionPublisher = reactionPublisher;
         _micSettings       = micSettings;
+        _rawMicDiagnosticRecorder = new RawMicDiagnosticRecorder(logger);
 
         InitializeComponent();
 
@@ -100,6 +103,8 @@ public partial class MainWindow : Window
             ApplyDiagnostics(_diagnostics.Result);
         else
             _diagnostics.DiagnosticsReady += OnDiagnosticsReady;
+
+        UpdateRawMicDiagnosticUiState(isRecording: false);
     }
 
     // ?? Backend override controls ?????????????????????????????????????????????
@@ -485,6 +490,22 @@ public partial class MainWindow : Window
         SessionDurationText.Text = _currentSnapshot.GetDurationDisplay(DateTimeOffset.UtcNow);
     }
 
+    private void UpdateRawMicDiagnosticUiState(bool isRecording)
+    {
+        _rawMicRecordingInProgress = isRecording;
+        RecordRawWaveInButton.IsEnabled = !isRecording;
+        RecordRawWasapiButton.IsEnabled = !isRecording;
+    }
+
+    private void ShowRawMicDiagnosticResult(string prefix, RawMicDiagnosticRecorder.Result result)
+    {
+        RawMicDiagnosticStatusText.Text =
+            $"{prefix}: {result.FilePath}\n" +
+            $"Device={result.DeviceName}  Format={result.Format}  Callbacks={result.CallbackCount}  " +
+            $"Bytes={result.TotalBytesWritten}  AvgRMS={result.AverageRms:F4}  MaxPeak={result.MaxPeak:F4}  " +
+            $"NonZero={result.AnyNonZeroSignalSeen}";
+    }
+
     // -- Button handlers -------------------------------------------------------
 
     private async void StartSessionButton_Click(object sender, RoutedEventArgs e)
@@ -518,6 +539,58 @@ public partial class MainWindow : Window
     {
         try   { await _coordinator.StopSessionAsync(); }
         catch (Exception ex) { _logger.LogError(ex, "Failed to stop session."); }
+    }
+
+    private async void RecordRawWaveInButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_rawMicRecordingInProgress)
+            return;
+
+        UpdateRawMicDiagnosticUiState(isRecording: true);
+        RawMicDiagnosticStatusText.Text = "Recording raw WaveIn microphone audio for 5 seconds...";
+
+        try
+        {
+            var result = await _rawMicDiagnosticRecorder
+                .RecordWaveInAsync(_micSettings.WaveInDeviceNumber)
+                .ConfigureAwait(true);
+            ShowRawMicDiagnosticResult("Raw WaveIn saved", result);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Raw WaveIn microphone diagnostic recording failed.");
+            RawMicDiagnosticStatusText.Text = $"Raw WaveIn recording failed: {ex.Message}";
+        }
+        finally
+        {
+            UpdateRawMicDiagnosticUiState(isRecording: false);
+        }
+    }
+
+    private async void RecordRawWasapiButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_rawMicRecordingInProgress)
+            return;
+
+        UpdateRawMicDiagnosticUiState(isRecording: true);
+        RawMicDiagnosticStatusText.Text = "Recording raw WASAPI microphone audio for 5 seconds...";
+
+        try
+        {
+            var result = await _rawMicDiagnosticRecorder
+                .RecordWasapiAsync()
+                .ConfigureAwait(true);
+            ShowRawMicDiagnosticResult("Raw WASAPI saved", result);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Raw WASAPI microphone diagnostic recording failed.");
+            RawMicDiagnosticStatusText.Text = $"Raw WASAPI recording failed: {ex.Message}";
+        }
+        finally
+        {
+            UpdateRawMicDiagnosticUiState(isRecording: false);
+        }
     }
 
     // -- Diagnostics -----------------------------------------------------------

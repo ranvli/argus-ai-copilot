@@ -26,6 +26,15 @@ public sealed class WaveInMicrophoneBackend : IDisposable
         public int BytesRecorded { get; init; }
     }
 
+    private sealed class StartupCallbackBufferEntry
+    {
+        public required byte[] Buffer { get; init; }
+        public required int Sequence { get; init; }
+        public required int BytesRecorded { get; init; }
+        public required float NativeRms { get; init; }
+        public required float NativePeak { get; init; }
+    }
+
     private readonly ILogger _logger;
 
     private const int TargetSampleRate    = 16_000;
@@ -38,6 +47,7 @@ public sealed class WaveInMicrophoneBackend : IDisposable
     private readonly int      _chunkBytes;
     private readonly string   _debugFolder;
     private readonly bool     _debugEnabled;
+    private readonly object   _pipelineLock = new();
 
     private WaveInEvent?          _waveIn;
     private BufferedWaveProvider? _captureBuffer;
@@ -49,7 +59,12 @@ public sealed class WaveInMicrophoneBackend : IDisposable
     private int                   _debugConvIndex;
     private Guid                  _sessionId;
     private volatile bool         _paused;
+    private volatile bool         _stopping;
     private WaveFormat?           _nativeFormat;
+    private bool                  _startupDeferredLogged;
+    private readonly List<StartupCallbackBufferEntry> _startupBufferedCallbacks = [];
+    private bool                  _startupRawHadSignal;
+    private int                   _callbackBoundarySequence;
 
     // ── Debug-WAV gate state (reset each session) ─────────────────────────────
     // Saves only on the first occurrence of each failure class — no periodic noise.
@@ -101,6 +116,7 @@ public sealed class WaveInMicrophoneBackend : IDisposable
     public event EventHandler<NativeCallbackInfo>? NativeCallbackObserved;
 
     public bool StartupValidationPending { get; set; }
+    public int RequestedSampleRate { get; set; } = 44_100;
 
     public WaveInMicrophoneBackend(
         ILogger logger,
@@ -122,34 +138,17 @@ public sealed class WaveInMicrophoneBackend : IDisposable
 
     public static WaveFormat ResolvePreferredInputFormat(ILogger logger, int deviceNumber)
     {
-        try
-        {
-            using var probe = new WaveInEvent
-            {
-                DeviceNumber       = deviceNumber,
-                WaveFormat         = new WaveFormat(16000, 16, 1),
-                BufferMilliseconds = 50
-            };
-            probe.StartRecording();
-            probe.StopRecording();
-            logger.LogInformation(
-                "[WaveInBackend.Open] Driver accepted 16kHz/16bit/mono — using direct PCM path (no resampler).");
-            return new WaveFormat(16000, 16, 1);
-        }
-        catch (Exception ex16k)
-        {
-            logger.LogWarning(
-                ex16k,
-                "[WaveInBackend.Open] 16kHz/16bit/mono rejected by driver for device #{Idx}. Falling back to 44100Hz/16bit/mono.",
-                deviceNumber);
-            return new WaveFormat(44100, 16, 1);
-        }
+        logger.LogDebug(
+            "[WaveInBackend.Open] Preferring 44100Hz/16bit/mono for device #{Idx} during WaveIn startup.",
+            deviceNumber);
+        return new WaveFormat(44100, 16, 1);
     }
 
     public void Start(Guid sessionId)
     {
         _sessionId = sessionId;
         _paused    = false;
+        _stopping  = false;
 
         // Reset per-session debug gate
         _dbgFirstSilentSaved      = false;
@@ -161,9 +160,16 @@ public sealed class WaveInMicrophoneBackend : IDisposable
         _firstSamplesLogged       = false;
         _firstChunkLogged         = false;
         _usingDirectPcm           = false;
+        _startupDeferredLogged    = false;
+        _startupRawHadSignal      = false;
+        _callbackBoundarySequence = 0;
+        _startupBufferedCallbacks.Clear();
         CloseContWav();   // ensure any stale writer from a prior session is closed
 
-        var requestFormat = ResolvePreferredInputFormat(_logger, _deviceNumber);
+        var preferredFormat = ResolvePreferredInputFormat(_logger, _deviceNumber);
+        var requestFormat = RequestedSampleRate == 16_000
+            ? new WaveFormat(16_000, 16, 1)
+            : preferredFormat;
 
         DeviceName    = GetDeviceName(_deviceNumber);
         _nativeFormat = requestFormat;
@@ -201,56 +207,54 @@ public sealed class WaveInMicrophoneBackend : IDisposable
             }
         }
 
-        _nativeDebugTarget = requestFormat.SampleRate
-                           * requestFormat.Channels
-                           * (requestFormat.BitsPerSample / 8)
-                           * 3;
-        _nativeDebugBuffer = new MemoryStream();
-
-        _captureBuffer = new BufferedWaveProvider(requestFormat)
+        lock (_pipelineLock)
         {
-            DiscardOnBufferOverflow = true,
-            BufferDuration = TimeSpan.FromSeconds(10)
-        };
+            _nativeDebugTarget = requestFormat.SampleRate
+                               * requestFormat.Channels
+                               * (requestFormat.BitsPerSample / 8)
+                               * 3;
+            _nativeDebugBuffer = new MemoryStream();
+            _captureBuffer = new BufferedWaveProvider(requestFormat)
+            {
+                DiscardOnBufferOverflow = true,
+                BufferDuration = TimeSpan.FromSeconds(10)
+            };
 
-        // If the device is already delivering Whisper-native PCM16 mono 16k,
-        // skip the sample-provider conversion chain entirely.
-        if (requestFormat.SampleRate == TargetSampleRate &&
-            requestFormat.BitsPerSample == TargetBitsPerSample &&
-            requestFormat.Channels == TargetChannels)
-        {
-            _pcm16Provider  = _captureBuffer;
-            _usingDirectPcm = true;
+            if (requestFormat.SampleRate == TargetSampleRate &&
+                requestFormat.BitsPerSample == TargetBitsPerSample &&
+                requestFormat.Channels == TargetChannels)
+            {
+                _pcm16Provider  = _captureBuffer;
+                _usingDirectPcm = true;
 
-            _logger.LogInformation(
-                "[WaveInBackend] Direct PCM path enabled: native format already matches target {Rate}Hz/16bit/1ch",
-                TargetSampleRate);
+                _logger.LogInformation(
+                    "[WaveInBackend] Direct PCM path enabled: native format already matches target {Rate}Hz/16bit/1ch",
+                    TargetSampleRate);
+            }
+            else
+            {
+                ISampleProvider sp = _captureBuffer.ToSampleProvider();
+
+                if (requestFormat.Channels > 1)
+                    sp = new StereoToMonoSampleProvider(sp);
+
+                if (requestFormat.SampleRate != TargetSampleRate)
+                    sp = new WdlResamplingSampleProvider(sp, TargetSampleRate);
+
+                _pcm16Provider = new SampleToWaveProvider16(sp);
+
+                _logger.LogInformation(
+                    "[WaveInBackend] Managed conversion path: {Fmt} → {Rate}Hz/16bit/1ch DrainBlock={Block}B",
+                    AudioChunkDiagnostics.FormatSummary(requestFormat), TargetSampleRate, DrainBlockBytes);
+            }
+
+            _pcmBuffer = new MemoryStream();
         }
-        else
-        {
-            ISampleProvider sp = _captureBuffer.ToSampleProvider();
-
-            if (requestFormat.Channels > 1)
-                sp = new StereoToMonoSampleProvider(sp);
-
-            if (requestFormat.SampleRate != TargetSampleRate)
-                sp = new WdlResamplingSampleProvider(sp, TargetSampleRate);
-
-            _pcm16Provider = new SampleToWaveProvider16(sp);
-
-            _logger.LogInformation(
-                "[WaveInBackend] Managed conversion path: {Fmt} → {Rate}Hz/16bit/1ch DrainBlock={Block}B",
-                AudioChunkDiagnostics.FormatSummary(requestFormat), TargetSampleRate, DrainBlockBytes);
-        }
-
-        _pcmBuffer = new MemoryStream();
 
         _waveIn.DataAvailable    += OnDataAvailable;
         _waveIn.RecordingStopped += OnRecordingStopped;
         _waveIn.StartRecording();
 
-        // Open a 5-second continuous capture WAV (written directly from driver callbacks,
-        // before any gain/normalize) so we can verify what the device actually delivers.
         if (_debugEnabled)
         {
             try
@@ -262,7 +266,7 @@ public sealed class WaveInMicrophoneBackend : IDisposable
                 _contWavBytesRemaining = requestFormat.SampleRate
                                        * requestFormat.Channels
                                        * (requestFormat.BitsPerSample / 8)
-                                       * 5;   // 5 seconds
+                                       * 5;
                 _logger.LogInformation(
                     "[WaveInBackend] Continuous 5s capture WAV opened: {Path}", contPath);
             }
@@ -277,124 +281,167 @@ public sealed class WaveInMicrophoneBackend : IDisposable
 
     public void Stop()
     {
-        _waveIn?.StopRecording();
-        // Drain and flush happen inside OnRecordingStopped / explicit call
-        DrainConverter();
-        FlushBuffer(isFinal: true);
+        _stopping = true;
+
+        if (_waveIn is not null)
+        {
+            _waveIn.DataAvailable    -= OnDataAvailable;
+            _waveIn.RecordingStopped -= OnRecordingStopped;
+            _waveIn.StopRecording();
+        }
+
+        lock (_pipelineLock)
+        {
+            DrainConverterLocked();
+            FlushBuffer(isFinal: true);
+        }
+
         DisposeInternals();
         _logger.LogInformation("[WaveInBackend] Stopped. Device='{Device}'", DeviceName);
     }
 
     public void Pause()  { _paused = true;  }
     public void Resume() { _paused = false; }
+    public void ReleaseStartupBufferedAudio()
+    {
+        lock (_pipelineLock)
+        {
+            if (_stopping || StartupValidationPending)
+                return;
+
+            FlushStartupBufferedCallbacksLocked();
+        }
+    }
 
     // ── Internal callbacks ────────────────────────────────────────────────────
 
     private void OnDataAvailable(object? sender, WaveInEventArgs e)
     {
-        if (_paused || e.BytesRecorded == 0) return;
-        if (_captureBuffer is null || _pcm16Provider is null) return;
+        if (_stopping || _paused || e.BytesRecorded == 0) return;
 
         try
         {
-            var span = e.Buffer.AsSpan(0, e.BytesRecorded);
-            var rms  = AudioChunkDiagnostics.ComputeRms(span);
-            var peak = AudioChunkDiagnostics.ComputePeak(span);
-            var (min, max, zeroRatio) = AudioChunkDiagnostics.ComputeMinMaxZero(span);
-            NativeRms  = rms;
-            NativePeak = peak;
+            NativeCallbackInfo? callbackInfo = null;
+            var callbackSequence = 0;
 
-            _logger.LogDebug(
-                "[WaveInNative] Device='{D}' Bytes={B} RMS={R:F4} Peak={P:F4} " +
-                "Min={Min:F4} Max={Max:F4} Zeros={Z:P0}",
-                DeviceName, e.BytesRecorded, rms, peak, min, max, zeroRatio);
-
-            try
+            lock (_pipelineLock)
             {
-                NativeCallbackObserved?.Invoke(this, new NativeCallbackInfo
+                if (_stopping || _captureBuffer is null || _pcm16Provider is null) return;
+
+                var span = e.Buffer.AsSpan(0, e.BytesRecorded);
+                var rms  = AudioChunkDiagnostics.ComputeRms(span);
+                var peak = AudioChunkDiagnostics.ComputePeak(span);
+                var (min, max, zeroRatio) = AudioChunkDiagnostics.ComputeMinMaxZero(span);
+                NativeRms  = rms;
+                NativePeak = peak;
+
+                _logger.LogDebug(
+                    "[WaveInNative] Device='{D}' Bytes={B} RMS={R:F4} Peak={P:F4} " +
+                    "Min={Min:F4} Max={Max:F4} Zeros={Z:P0}",
+                    DeviceName, e.BytesRecorded, rms, peak, min, max, zeroRatio);
+
+                callbackInfo = new NativeCallbackInfo
                 {
                     Rms = rms,
                     Peak = peak,
                     ZeroRatio = zeroRatio,
                     BytesRecorded = e.BytesRecorded
-                });
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "[WaveInBackend] NativeCallbackObserved handler threw.");
-            }
+                };
+                callbackSequence = ++_callbackBoundarySequence;
 
-            // ── One-time first-samples log (once per session) ─────────────────
-            if (!_firstSamplesLogged)
-            {
-                _firstSamplesLogged = true;
-                var sampleCount = Math.Min(32, span.Length / 2);
-                var sb = new System.Text.StringBuilder();
-                for (int si = 0; si < sampleCount; si++)
+                if (!_firstSamplesLogged)
                 {
-                    var s = (short)(span[si * 2] | (span[si * 2 + 1] << 8));
-                    sb.Append($"{s} ");
-                }
-                _logger.LogInformation(
-                    "[WaveInNative] First {N} samples (session start): [{Samples}]  " +
-                    "Bytes={Bytes} RMS={Rms:F4}",
-                    sampleCount, sb.ToString().TrimEnd(), e.BytesRecorded, rms);
-            }
-
-            // ── Throttled warnings — at most once per minute ──────────────────
-            var now = DateTimeOffset.UtcNow;
-            if (peak < 0.0001f)
-            {
-                if ((now - _lastSilentWarnAt).TotalSeconds >= 60)
-                {
-                    _lastSilentWarnAt = now;
-                    _logger.LogWarning(
-                        "[WaveInNative] ALL-ZERO buffer — device '{D}' index={Idx} is delivering no audio. " +
-                        "Possible causes: wrong device index, device not selected as Windows default, " +
-                        "or exclusive mode held by another app.",
-                        DeviceName, _deviceNumber);
-                }
-            }
-            else if (peak < 0.002f)
-            {
-                if ((now - _lastSilentWarnAt).TotalSeconds >= 60)
-                {
-                    _lastSilentWarnAt = now;
-                    _logger.LogWarning(
-                        "[WaveInNative] NEAR-SILENT buffer — peak={P:F4}. Device='{D}'",
-                        peak, DeviceName);
-                }
-            }
-
-            if (StartupValidationPending)
-                return;
-
-            if (_debugEnabled)
-            {
-                // Cap: only accumulate up to the target; reset happens in EmitChunk
-                // after save.  Do NOT reset-then-write here — EmitChunk runs
-                // synchronously in this call stack and would see only one callback.
-                if (_nativeDebugBuffer.Length < _nativeDebugTarget)
-                    _nativeDebugBuffer.Write(e.Buffer, 0, e.BytesRecorded);
-
-                // Continuous 5-second WAV capture (raw driver bytes, pre-pipeline).
-                if (_contWavWriter is not null && _contWavBytesRemaining > 0)
-                {
-                    var toWrite = Math.Min(e.BytesRecorded, _contWavBytesRemaining);
-                    _contWavWriter.Write(e.Buffer, 0, toWrite);
-                    _contWavBytesRemaining -= toWrite;
-                    if (_contWavBytesRemaining <= 0)
+                    _firstSamplesLogged = true;
+                    var sampleCount = Math.Min(32, span.Length / 2);
+                    var sb = new System.Text.StringBuilder();
+                    for (int si = 0; si < sampleCount; si++)
                     {
-                        _logger.LogInformation(
-                            "[WaveInBackend] Continuous 5s WAV complete: {Path}",
-                            _contWavWriter.Filename);
-                        CloseContWav();
+                        var s = (short)(span[si * 2] | (span[si * 2 + 1] << 8));
+                        sb.Append($"{s} ");
+                    }
+                    _logger.LogInformation(
+                        "[WaveInNative] First {N} samples (session start): [{Samples}]  " +
+                        "Bytes={Bytes} RMS={Rms:F4}",
+                        sampleCount, sb.ToString().TrimEnd(), e.BytesRecorded, rms);
+                }
+
+                var now = DateTimeOffset.UtcNow;
+                if (peak < 0.0001f)
+                {
+                    if ((now - _lastSilentWarnAt).TotalSeconds >= 60)
+                    {
+                        _lastSilentWarnAt = now;
+                        _logger.LogWarning(
+                            "[WaveInNative] ALL-ZERO buffer — device '{D}' index={Idx} is delivering no audio. " +
+                            "Possible causes: wrong device index, device not selected as Windows default, " +
+                            "or exclusive mode held by another app.",
+                            DeviceName, _deviceNumber);
                     }
                 }
+                else if (peak < 0.002f)
+                {
+                    if ((now - _lastSilentWarnAt).TotalSeconds >= 60)
+                    {
+                        _lastSilentWarnAt = now;
+                        _logger.LogWarning(
+                            "[WaveInNative] NEAR-SILENT buffer — peak={P:F4}. Device='{D}'",
+                            peak, DeviceName);
+                    }
+                }
+
+                if (_debugEnabled)
+                {
+                    if (_nativeDebugBuffer.Length < _nativeDebugTarget)
+                        _nativeDebugBuffer.Write(e.Buffer, 0, e.BytesRecorded);
+
+                    if (_contWavWriter is not null && _contWavBytesRemaining > 0)
+                    {
+                        var toWrite = Math.Min(e.BytesRecorded, _contWavBytesRemaining);
+                        _contWavWriter.Write(e.Buffer, 0, toWrite);
+                        _contWavBytesRemaining -= toWrite;
+                        if (_contWavBytesRemaining <= 0)
+                        {
+                            _logger.LogInformation(
+                                "[WaveInBackend] Continuous 5s WAV complete: {Path}",
+                                _contWavWriter.Filename);
+                            CloseContWav();
+                        }
+                    }
+                }
+
+                if (StartupValidationPending)
+                {
+                    BufferStartupCallbackLocked(e.Buffer, e.BytesRecorded, rms, peak);
+                    if (!_startupDeferredLogged)
+                    {
+                        _startupDeferredLogged = true;
+                        _logger.LogInformation(
+                            "[WaveInBackend] Deferring pipeline feed because startup validation is still pending.");
+                    }
+                    return;
+                }
+
+                FlushStartupBufferedCallbacksLocked();
+
+                _captureBuffer.AddSamples(e.Buffer, 0, e.BytesRecorded);
+                var bytesRead = DrainConverterLocked();
+                LogCallbackBoundary(
+                    callbackSequence,
+                    rms,
+                    peak,
+                    e.BytesRecorded,
+                    e.BytesRecorded,
+                    bytesRead,
+                    _pcmBuffer.Length,
+                    "live");
             }
 
-            _captureBuffer.AddSamples(e.Buffer, 0, e.BytesRecorded);
-            DrainConverter();
+            if (callbackInfo is not null)
+            {
+                try   { NativeCallbackObserved?.Invoke(this, callbackInfo); }
+                catch (Exception ex)
+                { _logger.LogWarning(ex, "[WaveInBackend] NativeCallbackObserved handler threw."); }
+            }
         }
         catch (Exception ex)
         {
@@ -402,16 +449,19 @@ public sealed class WaveInMicrophoneBackend : IDisposable
         }
     }
 
-    private void DrainConverter()
+    private int DrainConverterLocked()
     {
-        if (_pcm16Provider is null) return;
+        if (_pcm16Provider is null) return 0;
         var temp = new byte[DrainBlockBytes];
         int read;
+        var totalRead = 0;
         while ((read = _pcm16Provider.Read(temp, 0, temp.Length)) > 0)
         {
+            totalRead += read;
             _pcmBuffer.Write(temp, 0, read);
             TryEmitChunk();
         }
+        return totalRead;
     } 
     private void TryEmitChunk()
     {
@@ -477,6 +527,12 @@ public sealed class WaveInMicrophoneBackend : IDisposable
 
         if (!_firstChunkLogged)
         {
+            if (_startupRawHadSignal && IsClearlyDeadChunk(convRms, convPeak))
+            {
+                _logger.LogError(
+                    "[MicInvariant] Raw callback had signal but emitted chunk was silent. Audio lost inside Argus pipeline.");
+            }
+
             _firstChunkLogged = true;
             _logger.LogInformation(
                 "[WaveInChunk] FIRST CHUNK emitted. Device='{D}' Duration={Dur:F2}s Bytes={B} " +
@@ -656,6 +712,7 @@ public sealed class WaveInMicrophoneBackend : IDisposable
         CloseContWav();
         _pcm16Provider = null;
         _captureBuffer = null;
+        _startupBufferedCallbacks.Clear();
 
         if (_waveIn is not null)
         {
@@ -699,6 +756,85 @@ public sealed class WaveInMicrophoneBackend : IDisposable
     }
 
     // ── Static helpers ────────────────────────────────────────────────────────
+
+    private void BufferStartupCallbackLocked(byte[] buffer, int bytesRecorded, float nativeRms, float nativePeak)
+    {
+        var copy = new byte[bytesRecorded];
+        Buffer.BlockCopy(buffer, 0, copy, 0, bytesRecorded);
+
+        var sequence = ++_callbackBoundarySequence;
+        _startupBufferedCallbacks.Add(new StartupCallbackBufferEntry
+        {
+            Buffer = copy,
+            Sequence = sequence,
+            BytesRecorded = bytesRecorded,
+            NativeRms = nativeRms,
+            NativePeak = nativePeak
+        });
+
+        _startupRawHadSignal |= !IsClearlyDeadChunk(nativeRms, nativePeak);
+
+        LogCallbackBoundary(
+            sequence,
+            nativeRms,
+            nativePeak,
+            bytesRecorded,
+            0,
+            0,
+            _pcmBuffer.Length,
+            "startup_buffered");
+    }
+
+    private void FlushStartupBufferedCallbacksLocked()
+    {
+        if (_captureBuffer is null || _pcm16Provider is null || _startupBufferedCallbacks.Count == 0)
+            return;
+
+        foreach (var callback in _startupBufferedCallbacks)
+        {
+            _captureBuffer.AddSamples(callback.Buffer, 0, callback.BytesRecorded);
+            var bytesRead = DrainConverterLocked();
+            LogCallbackBoundary(
+                callback.Sequence,
+                callback.NativeRms,
+                callback.NativePeak,
+                callback.BytesRecorded,
+                callback.BytesRecorded,
+                bytesRead,
+                _pcmBuffer.Length,
+                "startup_flush");
+        }
+
+        _startupBufferedCallbacks.Clear();
+    }
+
+    private void LogCallbackBoundary(
+        int callbackNumber,
+        float nativeRms,
+        float nativePeak,
+        int bytesRecorded,
+        int bytesHandedToCaptureBuffer,
+        int bytesReadFromConversionProvider,
+        long chunkBufferBytes,
+        string phase)
+    {
+        if (callbackNumber > 5)
+            return;
+
+        _logger.LogInformation(
+            "[MicCallbackBoundary] backend=WaveIn cb={Callback} phase={Phase} nativeRms={NativeRms:F4} nativePeak={NativePeak:F4} bytesRecorded={BytesRecorded} bytesHanded={BytesHanded} bytesRead={BytesRead} chunkBufferBytes={ChunkBufferBytes}",
+            callbackNumber,
+            phase,
+            nativeRms,
+            nativePeak,
+            bytesRecorded,
+            bytesHandedToCaptureBuffer,
+            bytesReadFromConversionProvider,
+            chunkBufferBytes);
+    }
+
+    private static bool IsClearlyDeadChunk(float rms, float peak)
+        => rms < 0.0015f && peak < 0.005f;
 
     private static string GetDeviceName(int deviceNumber)
     {

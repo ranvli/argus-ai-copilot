@@ -49,6 +49,15 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
     private const float DeadChunkRmsThreshold = 0.0015f;
     private const float DeadChunkPeakThreshold = 0.005f;
 
+    private sealed class StartupCallbackBufferEntry
+    {
+        public required byte[] Buffer { get; init; }
+        public required int Sequence { get; init; }
+        public required int BytesRecorded { get; init; }
+        public required float NativeRms { get; init; }
+        public required float NativePeak { get; init; }
+    }
+
     // Debug artifact control
     public static bool DebugAudioEnabled = true;
     private readonly string _debugFolder;
@@ -149,12 +158,16 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
     // ── WaveIn path ───────────────────────────────────────────────────────────
 
     private WaveInMicrophoneBackend? _waveInBackend;
+    private int _waveInRequestedSampleRate = 44_100;
     private int _startupCallbackCount;
     private int _startupDeadCallbackCount;
     private float _startupCallbackRmsTotal;
     private float _startupCallbackPeakTotal;
     private volatile bool _startupValidationPending;
     private TaskCompletionSource<bool>? _startupValidationTcs;
+    private readonly List<StartupCallbackBufferEntry> _startupBufferedCallbacks = [];
+    private bool _startupRawHadSignal;
+    private int _callbackBoundarySequence;
 
     // ── Live signal levels (updated every chunk, read by the UI) ─────────────
 
@@ -309,6 +322,7 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
                 _debugFolder,
                 DebugAudioEnabled);
 
+            _waveInBackend.RequestedSampleRate = _waveInRequestedSampleRate;
             _waveInBackend.DiagGain      = WaveInDiagGain;
             _waveInBackend.DiagNormalize = WaveInDiagNormalize;
             _waveInBackend.StartupValidationPending = _startupValidationPending;
@@ -415,12 +429,6 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
                 "[MicNative/WASAPI] Device='{Dev}' Bytes={Bytes} RMS={Rms:F4} Peak={Peak:F4} " +
                 "Min={Min:F4} Max={Max:F4} Zeros={Zeros:P0}",
                 _deviceName, e.BytesRecorded, nativeRms, nativePeak, nativeMin, nativeMax, nativeZeroRatio);
-
-            if (_startupValidationPending)
-            {
-                ObserveStartupCallback(nativeRms, nativePeak);
-                return;
-            }
 
             // ── One-time first-samples log (once per session, not every chunk) ─
             if (!_firstSamplesLogged)
@@ -529,8 +537,29 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
                     CloseContWav();
             }
 
+            if (_startupValidationPending)
+            {
+                BufferStartupCallbackLocked(e.Buffer, e.BytesRecorded, nativeRms, nativePeak);
+                ObserveStartupCallback(nativeRms, nativePeak);
+
+                if (!_startupValidationPending)
+                    FlushStartupBufferedCallbacksLocked();
+
+                return;
+            }
+
             _captureBuffer.AddSamples(e.Buffer, 0, e.BytesRecorded);
-            DrainConverter();
+            var bytesRead = DrainConverterLocked();
+            LogCallbackBoundary(
+                "WASAPI",
+                ++_callbackBoundarySequence,
+                nativeRms,
+                nativePeak,
+                e.BytesRecorded,
+                e.BytesRecorded,
+                bytesRead,
+                _pcmBuffer.Length,
+                "live");
         }
         catch (Exception ex)
         {
@@ -539,9 +568,9 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
         } // lock (_captureLock)
     }
 
-    private void DrainConverter()
+    private int DrainConverterLocked()
     {
-        if (_pcm16Provider is null) return;
+        if (_pcm16Provider is null) return 0;
 
         // Use small fixed-size blocks so WdlResamplingSampleProvider can always
         // satisfy the request from the current callback's buffered input.
@@ -549,11 +578,14 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
         // input than one callback delivers — resulting in permanent silence.
         var temp = new byte[DrainBlockBytes];
         int read;
+        var totalRead = 0;
         while ((read = _pcm16Provider.Read(temp, 0, temp.Length)) > 0)
         {
+            totalRead += read;
             _pcmBuffer.Write(temp, 0, read);
             TryEmitChunk();
         }
+        return totalRead;
     }
 
     private void OnRecordingStopped(object? sender, StoppedEventArgs e)
@@ -616,6 +648,12 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
 
         if (!_firstChunkLogged)
         {
+            if (_startupRawHadSignal && IsClearlyDeadChunk(convRms, convPeak))
+            {
+                _logger.LogError(
+                    "[MicInvariant] Raw callback had signal but emitted chunk was silent. Audio lost inside Argus pipeline.");
+            }
+
             _firstChunkLogged = true;
             _logger.LogInformation(
                 "[MicChunk/WASAPI] FIRST CHUNK emitted. Device='{Dev}' Duration={Dur:F2}s Bytes={B} " +
@@ -806,6 +844,9 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
                 ct.ThrowIfCancellationRequested();
 
                 ActiveBackend = currentBackend;
+                if (currentBackend == MicBackend.WaveIn)
+                    _waveInRequestedSampleRate = attempt == 0 ? 44_100 : 16_000;
+
                 BeginStartupValidation();
 
                 if (currentBackend == MicBackend.WaveIn)
@@ -816,6 +857,10 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
                 var startupTask = _startupValidationTcs?.Task ?? Task.FromResult(true);
                 var completed = await Task.WhenAny(startupTask, Task.Delay(StartupValidationTimeout, ct)).ConfigureAwait(false);
                 var startupHealthy = completed == startupTask && await startupTask.ConfigureAwait(false);
+
+                if (currentBackend == MicBackend.WaveIn)
+                    LogWaveInRuntimeStartup(startupHealthy, !startupHealthy && attempt == 0);
+
                 if (startupHealthy)
                     return;
 
@@ -858,7 +903,7 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
 
     private void ObserveStartupCallback(float rms, float peak)
     {
-        if (!_startupValidationPending)
+        if (!_startupValidationPending || _startupValidationTcs?.Task.IsCompleted == true)
             return;
 
         _startupCallbackCount++;
@@ -875,15 +920,36 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
         var avgPeak = _startupCallbackPeakTotal / _startupCallbackCount;
         var healthy = avgRms >= DeadChunkRmsThreshold || avgPeak >= DeadChunkPeakThreshold;
 
-        _startupValidationPending = false;
-        if (_waveInBackend is not null)
-            _waveInBackend.StartupValidationPending = false;
+        if (healthy)
+        {
+            _startupValidationPending = false;
+            if (_waveInBackend is not null)
+            {
+                _waveInBackend.StartupValidationPending = false;
+                _waveInBackend.ReleaseStartupBufferedAudio();
+            }
+        }
 
         _logger.LogInformation(
             "[MicStartupValidation] backend={Backend} callbacks={Callbacks} avgRms={AvgRms:F4} avgPeak={AvgPeak:F4} deadCallbacks={DeadCallbacks} healthy={Healthy}",
             BackendName(ActiveBackend), _startupCallbackCount, avgRms, avgPeak, _startupDeadCallbackCount, healthy);
 
         _startupValidationTcs?.TrySetResult(healthy);
+    }
+
+    private void LogWaveInRuntimeStartup(bool healthy, bool retryingFallback)
+    {
+        var avgRms = _startupCallbackCount > 0 ? _startupCallbackRmsTotal / _startupCallbackCount : 0f;
+        var avgPeak = _startupCallbackCount > 0 ? _startupCallbackPeakTotal / _startupCallbackCount : 0f;
+
+        _logger.LogInformation(
+            "[WaveInRuntimeStartup] format={Rate}/16/1 callbacks={Callbacks} avgRms={AvgRms:F4} avgPeak={AvgPeak:F4} healthy={Healthy} retryingFallback={RetryingFallback}",
+            _waveInRequestedSampleRate,
+            _startupCallbackCount,
+            avgRms,
+            avgPeak,
+            healthy,
+            retryingFallback);
     }
 
     private async Task StartWasapiAsync(Guid sessionId)
@@ -1018,7 +1084,7 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
 
         lock (_captureLock)
         {
-            DrainConverter();
+            DrainConverterLocked();
             FlushBuffer(isFinal: true);
         }
 
@@ -1034,10 +1100,93 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
         _startupCallbackPeakTotal = 0f;
         _startupValidationPending = false;
         _startupValidationTcs = null;
+        _startupBufferedCallbacks.Clear();
+        _startupRawHadSignal = false;
+        _callbackBoundarySequence = 0;
         _firstSamplesLogged = false;
         _firstChunkLogged = false;
         _levelLogWindowActive = false;
         _levelLogCallbackCount = 0;
+    }
+
+    private void BufferStartupCallbackLocked(byte[] buffer, int bytesRecorded, float nativeRms, float nativePeak)
+    {
+        var copy = new byte[bytesRecorded];
+        Buffer.BlockCopy(buffer, 0, copy, 0, bytesRecorded);
+
+        var sequence = ++_callbackBoundarySequence;
+        _startupBufferedCallbacks.Add(new StartupCallbackBufferEntry
+        {
+            Buffer = copy,
+            Sequence = sequence,
+            BytesRecorded = bytesRecorded,
+            NativeRms = nativeRms,
+            NativePeak = nativePeak
+        });
+
+        _startupRawHadSignal |= !IsClearlyDeadChunk(nativeRms, nativePeak);
+
+        LogCallbackBoundary(
+            "WASAPI",
+            sequence,
+            nativeRms,
+            nativePeak,
+            bytesRecorded,
+            0,
+            0,
+            _pcmBuffer.Length,
+            "startup_buffered");
+    }
+
+    private void FlushStartupBufferedCallbacksLocked()
+    {
+        if (_captureBuffer is null || _pcm16Provider is null || _startupBufferedCallbacks.Count == 0)
+            return;
+
+        foreach (var callback in _startupBufferedCallbacks)
+        {
+            _captureBuffer.AddSamples(callback.Buffer, 0, callback.BytesRecorded);
+            var bytesRead = DrainConverterLocked();
+            LogCallbackBoundary(
+                "WASAPI",
+                callback.Sequence,
+                callback.NativeRms,
+                callback.NativePeak,
+                callback.BytesRecorded,
+                callback.BytesRecorded,
+                bytesRead,
+                _pcmBuffer.Length,
+                "startup_flush");
+        }
+
+        _startupBufferedCallbacks.Clear();
+    }
+
+    private void LogCallbackBoundary(
+        string backend,
+        int callbackNumber,
+        float nativeRms,
+        float nativePeak,
+        int bytesRecorded,
+        int bytesHandedToCaptureBuffer,
+        int bytesReadFromConversionProvider,
+        long chunkBufferBytes,
+        string phase)
+    {
+        if (callbackNumber > 5)
+            return;
+
+        _logger.LogInformation(
+            "[MicCallbackBoundary] backend={Backend} cb={Callback} phase={Phase} nativeRms={NativeRms:F4} nativePeak={NativePeak:F4} bytesRecorded={BytesRecorded} bytesHanded={BytesHanded} bytesRead={BytesRead} chunkBufferBytes={ChunkBufferBytes}",
+            backend,
+            callbackNumber,
+            phase,
+            nativeRms,
+            nativePeak,
+            bytesRecorded,
+            bytesHandedToCaptureBuffer,
+            bytesReadFromConversionProvider,
+            chunkBufferBytes);
     }
 
     private static bool IsClearlyDeadChunk(float rms, float peak)

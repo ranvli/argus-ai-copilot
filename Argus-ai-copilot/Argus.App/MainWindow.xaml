@@ -421,6 +421,31 @@
                             </StackPanel>
                         </Border>
 
+                        <Border Background="#F3F8FF" BorderBrush="#90CAF9" BorderThickness="1"
+                                CornerRadius="4" Padding="10,8" Margin="0,0,0,10">
+                            <StackPanel>
+                                <TextBlock Text="🧪 Raw Microphone Diagnostics"
+                                           FontSize="11" FontWeight="SemiBold"
+                                           Foreground="#1565C0" Margin="0,0,0,6"/>
+
+                                <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
+                                    <Button x:Name="RecordRawWaveInButton"
+                                            Content="Record Raw WaveIn 5s"
+                                            Padding="10,4" Margin="0,0,8,0"
+                                            Click="RecordRawWaveInButton_Click"/>
+                                    <Button x:Name="RecordRawWasapiButton"
+                                            Content="Record Raw WASAPI 5s"
+                                            Padding="10,4"
+                                            Click="RecordRawWasapiButton_Click"/>
+                                </StackPanel>
+
+                                <TextBlock x:Name="RawMicDiagnosticStatusText"
+                                           Text="No raw microphone diagnostic recording has been run yet."
+                                           FontSize="10" Foreground="#616161"
+                                           TextWrapping="Wrap"/>
+                            </StackPanel>
+                        </Border>
+
                         <!-- Microphone status -->
                         <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
                             <Ellipse x:Name="MicDot" Width="10" Height="10"
