@@ -89,9 +89,9 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
 
     /// <summary>
     /// Which backend to use. Set before <see cref="StartAsync"/>.
-    /// Default is <see cref="MicBackend.Auto"/> (probes both; picks the one with signal).
+    /// Default is <see cref="MicBackend.Wasapi"/>.
     /// </summary>
-    public MicBackend SelectedBackend { get; set; } = MicBackend.Auto;
+    public MicBackend SelectedBackend { get; set; } = MicBackend.Wasapi;
 
     /// <summary>
     /// WaveIn device number (0 = Windows default). Used when backend is WaveIn or Auto.
@@ -168,6 +168,9 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
     private readonly List<StartupCallbackBufferEntry> _startupBufferedCallbacks = [];
     private bool _startupRawHadSignal;
     private int _callbackBoundarySequence;
+    private bool _useWasapiFastPath;
+    private bool _wasapiFastPathFirstCallbackLogged;
+    private bool _wasapiFastPathFirstChunkLogged;
 
     // ── Live signal levels (updated every chunk, read by the UI) ─────────────
 
@@ -240,6 +243,9 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
         _firstSamplesLogged       = false;
         _firstChunkLogged         = false;
         ResetStartupValidationState();
+        _useWasapiFastPath = false;
+        _wasapiFastPathFirstCallbackLogged = false;
+        _wasapiFastPathFirstChunkLogged = false;
 
         // Reset continuous WAV state for new session
         CloseContWav();
@@ -397,7 +403,7 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
             return;
         }
         if (_paused || e.BytesRecorded == 0) return;
-        if (_captureBuffer is null || _pcm16Provider is null) return;
+        if (!_useWasapiFastPath && (_captureBuffer is null || _pcm16Provider is null)) return;
 
         lock (_captureLock)
         {
@@ -429,6 +435,15 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
                 "[MicNative/WASAPI] Device='{Dev}' Bytes={Bytes} RMS={Rms:F4} Peak={Peak:F4} " +
                 "Min={Min:F4} Max={Max:F4} Zeros={Zeros:P0}",
                 _deviceName, e.BytesRecorded, nativeRms, nativePeak, nativeMin, nativeMax, nativeZeroRatio);
+
+            if (_useWasapiFastPath && !_wasapiFastPathFirstCallbackLogged)
+            {
+                _wasapiFastPathFirstCallbackLogged = true;
+                _logger.LogInformation(
+                    "[WasapiFastPath] firstCallback rms={Rms:F4} peak={Peak:F4}",
+                    nativeRms,
+                    nativePeak);
+            }
 
             // ── One-time first-samples log (once per session, not every chunk) ─
             if (!_firstSamplesLogged)
@@ -548,15 +563,27 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
                 return;
             }
 
-            _captureBuffer.AddSamples(e.Buffer, 0, e.BytesRecorded);
-            var bytesRead = DrainConverterLocked();
+            int bytesRead;
+            int bytesHanded;
+            if (_useWasapiFastPath)
+            {
+                bytesHanded = e.BytesRecorded;
+                bytesRead = AppendWasapiFastPathPcm16Locked(e.Buffer, e.BytesRecorded);
+            }
+            else
+            {
+                _captureBuffer.AddSamples(e.Buffer, 0, e.BytesRecorded);
+                bytesHanded = e.BytesRecorded;
+                bytesRead = DrainConverterLocked();
+            }
+
             LogCallbackBoundary(
                 "WASAPI",
                 ++_callbackBoundarySequence,
                 nativeRms,
                 nativePeak,
                 e.BytesRecorded,
-                e.BytesRecorded,
+                bytesHanded,
                 bytesRead,
                 _pcmBuffer.Length,
                 "live");
@@ -652,6 +679,15 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
             {
                 _logger.LogError(
                     "[MicInvariant] Raw callback had signal but emitted chunk was silent. Audio lost inside Argus pipeline.");
+            }
+
+            if (_useWasapiFastPath && !_wasapiFastPathFirstChunkLogged)
+            {
+                _wasapiFastPathFirstChunkLogged = true;
+                _logger.LogInformation(
+                    "[WasapiFastPath] firstChunk rms={Rms:F4} peak={Peak:F4}",
+                    convRms,
+                    convPeak);
             }
 
             _firstChunkLogged = true;
@@ -1006,6 +1042,8 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
             _nativeFormat = _capture.WaveFormat;
             var nativeFormat = _nativeFormat;
 
+            _useWasapiFastPath = IsWasapiDirectFloat32MonoFastPath(nativeFormat);
+
             _logger.LogInformation(
                 "[MicSource.Open] Backend=WASAPI DeviceId='{DevId}' DeviceName='{Name}' " +
                 "Format={Rate}Hz/{Bits}bit/{Ch}ch ({Enc}) SessionId={Id}",
@@ -1013,29 +1051,49 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
                 nativeFormat.SampleRate, nativeFormat.BitsPerSample, nativeFormat.Channels,
                 nativeFormat.Encoding, sessionId);
 
+            _logger.LogInformation(
+                "[WasapiFastPath] nativeFormat={Format}",
+                AudioChunkDiagnostics.FormatSummary(nativeFormat));
+
+            if (_useWasapiFastPath)
+            {
+                _logger.LogInformation("[WasapiFastPath] usingDirectFloat32ToPcm16=True");
+            }
+
             _nativeDebugTargetBytes = nativeFormat.SampleRate
                                     * nativeFormat.Channels
                                     * (nativeFormat.BitsPerSample / 8)
                                     * 3;
             _nativeDebugBuffer = new MemoryStream();
 
-            _captureBuffer = new BufferedWaveProvider(nativeFormat)
+            if (_useWasapiFastPath)
             {
-                DiscardOnBufferOverflow = true,
-                BufferDuration          = TimeSpan.FromSeconds(10)
-            };
+                _captureBuffer = null;
+                _pcm16Provider = null;
+                _logger.LogInformation(
+                    "[MicSource.Start] WASAPI fast path active: {Summary} → direct float32 mono to PCM16 chunk buffer",
+                    AudioChunkDiagnostics.FormatSummary(nativeFormat));
+            }
+            else
+            {
+                _captureBuffer = new BufferedWaveProvider(nativeFormat)
+                {
+                    DiscardOnBufferOverflow = true,
+                    BufferDuration          = TimeSpan.FromSeconds(10)
+                };
 
-            ISampleProvider sampleProvider = _captureBuffer.ToSampleProvider();
-            if (nativeFormat.Channels > 1)
-                sampleProvider = new StereoToMonoSampleProvider(sampleProvider);
-            if (nativeFormat.SampleRate != TargetSampleRate)
-                sampleProvider = new WdlResamplingSampleProvider(sampleProvider, TargetSampleRate);
+                ISampleProvider sampleProvider = _captureBuffer.ToSampleProvider();
+                if (nativeFormat.Channels > 1)
+                    sampleProvider = new StereoToMonoSampleProvider(sampleProvider);
+                if (nativeFormat.SampleRate != TargetSampleRate)
+                    sampleProvider = new WdlResamplingSampleProvider(sampleProvider, TargetSampleRate);
 
-            _pcm16Provider = new SampleToWaveProvider16(sampleProvider);
+                _pcm16Provider = new SampleToWaveProvider16(sampleProvider);
 
-            _logger.LogInformation(
-                "[MicSource.Start] chain: {Summary} → {TargetRate}Hz/16bit/1ch DrainBlock={Block}B (managed)",
-                AudioChunkDiagnostics.FormatSummary(nativeFormat), TargetSampleRate, DrainBlockBytes);
+                _logger.LogInformation(
+                    "[MicSource.Start] chain: {Summary} → {TargetRate}Hz/16bit/1ch DrainBlock={Block}B (managed)",
+                    AudioChunkDiagnostics.FormatSummary(nativeFormat), TargetSampleRate, DrainBlockBytes);
+            }
 
             _pcmBuffer = new MemoryStream();
             _capture.DataAvailable    += OnDataAvailable;
@@ -1140,20 +1198,35 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
 
     private void FlushStartupBufferedCallbacksLocked()
     {
-        if (_captureBuffer is null || _pcm16Provider is null || _startupBufferedCallbacks.Count == 0)
+        if (_startupBufferedCallbacks.Count == 0)
             return;
 
         foreach (var callback in _startupBufferedCallbacks)
         {
-            _captureBuffer.AddSamples(callback.Buffer, 0, callback.BytesRecorded);
-            var bytesRead = DrainConverterLocked();
+            int bytesRead;
+            int bytesHanded;
+            if (_useWasapiFastPath)
+            {
+                bytesHanded = callback.BytesRecorded;
+                bytesRead = AppendWasapiFastPathPcm16Locked(callback.Buffer, callback.BytesRecorded);
+            }
+            else
+            {
+                if (_captureBuffer is null || _pcm16Provider is null)
+                    break;
+
+                _captureBuffer.AddSamples(callback.Buffer, 0, callback.BytesRecorded);
+                bytesHanded = callback.BytesRecorded;
+                bytesRead = DrainConverterLocked();
+            }
+
             LogCallbackBoundary(
                 "WASAPI",
                 callback.Sequence,
                 callback.NativeRms,
                 callback.NativePeak,
                 callback.BytesRecorded,
-                callback.BytesRecorded,
+                bytesHanded,
                 bytesRead,
                 _pcmBuffer.Length,
                 "startup_flush");
@@ -1187,6 +1260,37 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
             bytesHandedToCaptureBuffer,
             bytesReadFromConversionProvider,
             chunkBufferBytes);
+    }
+
+    private int AppendWasapiFastPathPcm16Locked(byte[] buffer, int bytesRecorded)
+    {
+        var pcm16 = ConvertFloat32MonoToPcm16(buffer, bytesRecorded);
+        _pcmBuffer.Write(pcm16, 0, pcm16.Length);
+        TryEmitChunk();
+        return pcm16.Length;
+    }
+
+    private static bool IsWasapiDirectFloat32MonoFastPath(WaveFormat format)
+        => format.SampleRate == TargetSampleRate
+        && format.Channels == TargetChannels
+        && format.BitsPerSample == 32
+        && WasapiIsolationTest.IsIeeeFloat(format);
+
+    private static byte[] ConvertFloat32MonoToPcm16(byte[] buffer, int bytesRecorded)
+    {
+        var sampleCount = bytesRecorded / 4;
+        var pcm16 = new byte[sampleCount * 2];
+
+        for (int i = 0; i < sampleCount; i++)
+        {
+            var sample = BitConverter.ToSingle(buffer, i * 4);
+            var scaled = Math.Clamp((int)MathF.Round(sample * short.MaxValue), short.MinValue, short.MaxValue);
+            var pcm = (short)scaled;
+            pcm16[i * 2] = (byte)(pcm & 0xFF);
+            pcm16[i * 2 + 1] = (byte)((pcm >> 8) & 0xFF);
+        }
+
+        return pcm16;
     }
 
     private static bool IsClearlyDeadChunk(float rms, float peak)

@@ -323,6 +323,7 @@ public sealed class WaveInMicrophoneBackend : IDisposable
         {
             NativeCallbackInfo? callbackInfo = null;
             var callbackSequence = 0;
+            var deferPipelineFeed = false;
 
             lock (_pipelineLock)
             {
@@ -418,22 +419,30 @@ public sealed class WaveInMicrophoneBackend : IDisposable
                         _logger.LogInformation(
                             "[WaveInBackend] Deferring pipeline feed because startup validation is still pending.");
                     }
-                    return;
+                    _logger.LogInformation(
+                        "[WaveInStartupCallback] deliveredToOuterValidator=true cb={N} rms={Rms:F4} peak={Peak:F4}",
+                        callbackSequence,
+                        rms,
+                        peak);
+                    deferPipelineFeed = true;
                 }
 
-                FlushStartupBufferedCallbacksLocked();
+                if (!deferPipelineFeed)
+                {
+                    FlushStartupBufferedCallbacksLocked();
 
-                _captureBuffer.AddSamples(e.Buffer, 0, e.BytesRecorded);
-                var bytesRead = DrainConverterLocked();
-                LogCallbackBoundary(
-                    callbackSequence,
-                    rms,
-                    peak,
-                    e.BytesRecorded,
-                    e.BytesRecorded,
-                    bytesRead,
-                    _pcmBuffer.Length,
-                    "live");
+                    _captureBuffer.AddSamples(e.Buffer, 0, e.BytesRecorded);
+                    var bytesRead = DrainConverterLocked();
+                    LogCallbackBoundary(
+                        callbackSequence,
+                        rms,
+                        peak,
+                        e.BytesRecorded,
+                        e.BytesRecorded,
+                        bytesRead,
+                        _pcmBuffer.Length,
+                        "live");
+                }
             }
 
             if (callbackInfo is not null)

@@ -10,10 +10,10 @@ public sealed class MicAudioSettings
 {
     /// <summary>
     /// Which backend to use for microphone capture.
-    /// Default is <see cref="MicBackend.WaveIn"/> — the most reliable option
-    /// when WASAPI shared-mode delivers silence.
+    /// Default is <see cref="MicBackend.Wasapi"/> — the preferred production
+    /// microphone path.
     /// </summary>
-    public MicBackend Backend { get; set; } = MicBackend.WaveIn;
+    public MicBackend Backend { get; set; } = MicBackend.Wasapi;
 
     /// <summary>
     /// WaveIn device index (0 = Windows default microphone).
