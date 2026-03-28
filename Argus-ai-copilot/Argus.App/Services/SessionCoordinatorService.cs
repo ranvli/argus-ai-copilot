@@ -57,7 +57,7 @@ internal sealed class SessionCoordinatorService
     // _pipelineScope MUST outlive the pipeline — it owns the Transient capture sources.
     // Dispose only after pipeline.StopAsync() returns.
     private ITranscriptionPipeline? _pipeline;
-    private IServiceScope?          _pipelineScope;
+    private AsyncServiceScope?      _pipelineScope;
     private CancellationTokenSource? _pipelineStoppingCts;
     private int _transcriptSegmentCount;
 
@@ -439,8 +439,8 @@ internal sealed class SessionCoordinatorService
             // Disposing the scope while capture is running would call Dispose()
             // on those sources and stop WASAPI recording immediately.
             // Scope is disposed in StopPipelineAsync, after pipeline.StopAsync() returns.
-            _pipelineScope = _scopeFactory.CreateScope();
-            var sp = _pipelineScope.ServiceProvider;
+            _pipelineScope = _scopeFactory.CreateAsyncScope();
+            var sp = _pipelineScope.Value.ServiceProvider;
 
             _logger.LogInformation("[Pipeline.Start] Resolving capture sources from long-lived scope.");
 
@@ -519,7 +519,8 @@ internal sealed class SessionCoordinatorService
         {
             _logger.LogError(ex, "[Pipeline.Start] Failed to start transcription pipeline — session continues without audio.");
             // Clean up the scope since startup failed.
-            _pipelineScope?.Dispose();
+            if (_pipelineScope is { } failedScope)
+                await failedScope.DisposeAsync();
             _pipelineScope = null;
             _pipelineStoppingCts?.Dispose();
             _pipelineStoppingCts = null;
@@ -564,7 +565,8 @@ internal sealed class SessionCoordinatorService
             // Dispose capture sources by disposing the scope AFTER the pipeline
             // has fully stopped. This is the correct disposal order.
             _logger.LogInformation("[Pipeline.Stop] Disposing pipeline scope (capture sources will be disposed now).");
-            _pipelineScope?.Dispose();
+            if (_pipelineScope is { } pipelineScope)
+                await pipelineScope.DisposeAsync();
             _pipelineScope = null;
 
             _pipelineStoppingCts?.Dispose();

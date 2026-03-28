@@ -163,11 +163,14 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
     private int _startupDeadCallbackCount;
     private float _startupCallbackRmsTotal;
     private float _startupCallbackPeakTotal;
+    private long _startupBytesReceived;
     private volatile bool _startupValidationPending;
     private TaskCompletionSource<bool>? _startupValidationTcs;
     private readonly List<StartupCallbackBufferEntry> _startupBufferedCallbacks = [];
     private bool _startupRawHadSignal;
     private int _callbackBoundarySequence;
+    private bool _startupUnexpectedRecordingStopped;
+    private Exception? _startupFailureException;
     private bool _useWasapiFastPath;
     private bool _wasapiFastPathFirstCallbackLogged;
     private bool _wasapiFastPathFirstChunkLogged;
@@ -555,7 +558,7 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
             if (_startupValidationPending)
             {
                 BufferStartupCallbackLocked(e.Buffer, e.BytesRecorded, nativeRms, nativePeak);
-                ObserveStartupCallback(nativeRms, nativePeak);
+                ObserveStartupCallback(nativeRms, nativePeak, e.BytesRecorded);
 
                 if (!_startupValidationPending)
                     FlushStartupBufferedCallbacksLocked();
@@ -590,6 +593,11 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
         }
         catch (Exception ex)
         {
+            if (_startupValidationPending)
+            {
+                _startupFailureException = ex;
+                _startupValidationTcs?.TrySetResult(false);
+            }
             _logger.LogError(ex, "[MicSource.OnDataAvailable] Exception. Device='{Device}'", _deviceName);
         }
         } // lock (_captureLock)
@@ -619,6 +627,13 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
     {
         if (e.Exception is not null)
         {
+            if (_startupValidationPending && !_stopping)
+            {
+                _startupFailureException = e.Exception;
+                _startupUnexpectedRecordingStopped = true;
+                _startupValidationTcs?.TrySetResult(false);
+            }
+
             Status = AudioCaptureStatus.DeviceError;
             _logger.LogError(
                 e.Exception,
@@ -627,6 +642,14 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
         }
         else
         {
+            if (_startupValidationPending && !_stopping)
+            {
+                _startupUnexpectedRecordingStopped = true;
+                _startupFailureException ??= new InvalidOperationException(
+                    $"Microphone recording stopped unexpectedly during startup on device '{_deviceName}'.");
+                _startupValidationTcs?.TrySetResult(false);
+            }
+
             _logger.LogInformation(
                 "[MicrophoneSource.RecordingStopped] Recording stopped cleanly. Status={Status} Device='{Device}'",
                 Status, _deviceName);
@@ -857,7 +880,7 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
 
     private void OnWaveInNativeCallbackObserved(object? sender, WaveInMicrophoneBackend.NativeCallbackInfo info)
     {
-        ObserveStartupCallback(info.Rms, info.Peak);
+        ObserveStartupCallback(info.Rms, info.Peak, info.BytesRecorded);
     }
 
     private void OnWaveInChunkReady(object? sender, AudioChunk chunk)
@@ -892,7 +915,9 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
 
                 var startupTask = _startupValidationTcs?.Task ?? Task.FromResult(true);
                 var completed = await Task.WhenAny(startupTask, Task.Delay(StartupValidationTimeout, ct)).ConfigureAwait(false);
-                var startupHealthy = completed == startupTask && await startupTask.ConfigureAwait(false);
+                var startupHealthy = completed == startupTask
+                    ? await startupTask.ConfigureAwait(false)
+                    : CompleteStartupValidationAfterTimeout();
 
                 if (currentBackend == MicBackend.WaveIn)
                     LogWaveInRuntimeStartup(startupHealthy, !startupHealthy && attempt == 0);
@@ -937,7 +962,7 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
         _startupValidationTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
     }
 
-    private void ObserveStartupCallback(float rms, float peak)
+    private void ObserveStartupCallback(float rms, float peak, int bytesRecorded)
     {
         if (!_startupValidationPending || _startupValidationTcs?.Task.IsCompleted == true)
             return;
@@ -945,6 +970,7 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
         _startupCallbackCount++;
         _startupCallbackRmsTotal += rms;
         _startupCallbackPeakTotal += peak;
+        _startupBytesReceived += bytesRecorded;
 
         if (IsClearlyDeadChunk(rms, peak))
             _startupDeadCallbackCount++;
@@ -952,25 +978,55 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
         if (_startupCallbackCount < StartupValidationCallbackCount)
             return;
 
-        var avgRms  = _startupCallbackRmsTotal / _startupCallbackCount;
-        var avgPeak = _startupCallbackPeakTotal / _startupCallbackCount;
-        var healthy = avgRms >= DeadChunkRmsThreshold || avgPeak >= DeadChunkPeakThreshold;
+        var healthy = EvaluateStartupStreamHealth();
+        CompleteStartupValidation(healthy);
+    }
+
+    private bool CompleteStartupValidationAfterTimeout()
+    {
+        var healthy = EvaluateStartupStreamHealth();
+        CompleteStartupValidation(healthy);
+        return healthy;
+    }
+
+    private bool EvaluateStartupStreamHealth()
+        => _startupCallbackCount > 0
+        && _startupBytesReceived > 0
+        && !_startupUnexpectedRecordingStopped
+        && _startupFailureException is null;
+
+    private void CompleteStartupValidation(bool healthy)
+    {
+        var avgRms  = _startupCallbackCount > 0 ? _startupCallbackRmsTotal / _startupCallbackCount : 0f;
+        var avgPeak = _startupCallbackCount > 0 ? _startupCallbackPeakTotal / _startupCallbackCount : 0f;
 
         if (healthy)
-        {
-            _startupValidationPending = false;
-            if (_waveInBackend is not null)
-            {
-                _waveInBackend.StartupValidationPending = false;
-                _waveInBackend.ReleaseStartupBufferedAudio();
-            }
-        }
+            ReleaseStartupValidationGate();
 
         _logger.LogInformation(
-            "[MicStartupValidation] backend={Backend} callbacks={Callbacks} avgRms={AvgRms:F4} avgPeak={AvgPeak:F4} deadCallbacks={DeadCallbacks} healthy={Healthy}",
-            BackendName(ActiveBackend), _startupCallbackCount, avgRms, avgPeak, _startupDeadCallbackCount, healthy);
+            "[MicStartupValidation] backend={Backend} callbacks={Callbacks} bytes={Bytes} avgRms={AvgRms:F4} avgPeak={AvgPeak:F4} deadCallbacks={DeadCallbacks} healthy={Healthy} stoppedUnexpectedly={StoppedUnexpectedly} failure={Failure}",
+            BackendName(ActiveBackend),
+            _startupCallbackCount,
+            _startupBytesReceived,
+            avgRms,
+            avgPeak,
+            _startupDeadCallbackCount,
+            healthy,
+            _startupUnexpectedRecordingStopped,
+            _startupFailureException?.Message ?? "(none)");
 
         _startupValidationTcs?.TrySetResult(healthy);
+    }
+
+    private void ReleaseStartupValidationGate()
+    {
+        _startupValidationPending = false;
+
+        if (_waveInBackend is not null)
+        {
+            _waveInBackend.StartupValidationPending = false;
+            _waveInBackend.ReleaseStartupBufferedAudio();
+        }
     }
 
     private void LogWaveInRuntimeStartup(bool healthy, bool retryingFallback)
@@ -1156,11 +1212,14 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
         _startupDeadCallbackCount = 0;
         _startupCallbackRmsTotal = 0f;
         _startupCallbackPeakTotal = 0f;
+        _startupBytesReceived = 0;
         _startupValidationPending = false;
         _startupValidationTcs = null;
         _startupBufferedCallbacks.Clear();
         _startupRawHadSignal = false;
         _callbackBoundarySequence = 0;
+        _startupUnexpectedRecordingStopped = false;
+        _startupFailureException = null;
         _firstSamplesLogged = false;
         _firstChunkLogged = false;
         _levelLogWindowActive = false;
