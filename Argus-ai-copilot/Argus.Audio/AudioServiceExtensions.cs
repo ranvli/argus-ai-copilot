@@ -15,6 +15,9 @@ public static class AudioServiceExtensions
         // Device discovery: singleton — enumerator is lightweight and stateless.
         services.AddSingleton<IAudioDeviceDiscovery, WindowsAudioDeviceDiscovery>();
 
+        // Mic backend settings: singleton — the UI writes to this; the coordinator reads it.
+        services.AddSingleton<MicAudioSettings>();
+
         // Capture sources: transient — a fresh instance is created per session.
         services.AddTransient<MicrophoneCaptureSource>();
         services.AddTransient<SystemAudioCaptureSource>();

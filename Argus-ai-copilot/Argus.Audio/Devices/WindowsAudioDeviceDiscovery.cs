@@ -107,4 +107,104 @@ public sealed class WindowsAudioDeviceDiscovery : IAudioDeviceDiscovery
             return null;
         }
     }
+
+    /// <summary>
+    /// Enumerates ALL active capture and render endpoints and logs them at Information level.
+    /// Call once at startup to have a complete picture of the audio hardware in the log.
+    /// Logs: endpoint ID, friendly name, device state, default role, mix format (channels/rate/bits),
+    /// and WaveIn (WinMM) device capabilities including manufacturer/product IDs.
+    /// </summary>
+    public void LogAllEndpoints()
+    {
+        try
+        {
+            using var enumerator = new MMDeviceEnumerator();
+
+            // ── Default devices ───────────────────────────────────────────────
+            foreach (var (flow, roleLabel) in new[]
+            {
+                (DataFlow.Capture, "Capture/Multimedia"),
+                (DataFlow.Capture, "Capture/Communications"),
+                (DataFlow.Render,  "Render/Multimedia"),
+                (DataFlow.Render,  "Render/Communications"),
+            })
+            {
+                var role = roleLabel.Contains("Communications") ? Role.Communications : Role.Multimedia;
+                try
+                {
+                    var dev = enumerator.GetDefaultAudioEndpoint(flow, role);
+                    _logger.LogInformation(
+                        "[AudioEndpoints] DEFAULT {Role}: '{Name}'  Id={Id}  State={State}",
+                        roleLabel, dev.FriendlyName, dev.ID, dev.State);
+                }
+                catch
+                {
+                    _logger.LogInformation("[AudioEndpoints] DEFAULT {Role}: (none)", roleLabel);
+                }
+            }
+
+            // ── All active capture endpoints ──────────────────────────────────
+            var captures = enumerator.EnumerateAudioEndPoints(DataFlow.Capture, DeviceState.Active);
+            _logger.LogInformation("[AudioEndpoints] Active capture endpoints: {Count}", captures.Count);
+            for (int i = 0; i < captures.Count; i++)
+            {
+                var d = captures[i];
+                string mixFmt = "(unavailable)";
+                string muteState = "(unavailable)";
+                string volume = "(unavailable)";
+                try
+                {
+                    var fmt = d.AudioClient.MixFormat;
+                    mixFmt = $"{fmt.SampleRate}Hz/{fmt.BitsPerSample}bit/{fmt.Channels}ch ({fmt.Encoding})";
+                }
+                catch { /* best-effort */ }
+                try
+                {
+                    muteState = d.AudioEndpointVolume.Mute ? "MUTED" : "unmuted";
+                    volume    = $"{d.AudioEndpointVolume.MasterVolumeLevelScalar:P0}";
+                }
+                catch { /* best-effort — some capture devices expose no volume control */ }
+
+                _logger.LogInformation(
+                    "[AudioEndpoints]   Capture[{Idx}] '{Name}'  Id={Id}  State={State}  " +
+                    "MixFormat={MixFmt}  Mute={Mute}  Volume={Vol}",
+                    i, d.FriendlyName, d.ID, d.State, mixFmt, muteState, volume);
+            }
+
+            // ── All active render endpoints ───────────────────────────────────
+            var renders = enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active);
+            _logger.LogInformation("[AudioEndpoints] Active render endpoints: {Count}", renders.Count);
+            for (int i = 0; i < renders.Count; i++)
+            {
+                var d = renders[i];
+                _logger.LogInformation(
+                    "[AudioEndpoints]   Render[{Idx}] '{Name}'  Id={Id}",
+                    i, d.FriendlyName, d.ID);
+            }
+
+            // ── WaveIn (WinMM MME) devices ────────────────────────────────────
+            var waveInCount = NAudio.Wave.WaveIn.DeviceCount;
+            _logger.LogInformation("[AudioEndpoints] WaveIn (WinMM) devices: {Count}", waveInCount);
+            for (int i = 0; i < waveInCount; i++)
+            {
+                try
+                {
+                    var caps = NAudio.Wave.WaveIn.GetCapabilities(i);
+                    _logger.LogInformation(
+                        "[AudioEndpoints]   WaveIn[{Idx}] '{Name}'  Channels={Ch}  " +
+                        "ManufacturerGuid={Mfr}  ProductGuid={Prod}",
+                        i, caps.ProductName, caps.Channels,
+                        caps.ManufacturerGuid, caps.ProductGuid);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "[AudioEndpoints]   WaveIn[{Idx}] failed to query capabilities.", i);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[AudioEndpoints] Failed to enumerate audio endpoints.");
+        }
+    }
 }

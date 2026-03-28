@@ -41,6 +41,7 @@ internal sealed class SessionCoordinatorService
     private readonly TranscriptBuffer _transcriptBuffer;
     private readonly IntentDetectionService _intentDetector;
     private readonly AssistantReactionService _assistantReaction;
+    private readonly MicAudioSettings _micSettings;
 
     // All state fields are accessed only via operations serialised through _gate.
     private readonly SemaphoreSlim _gate = new(1, 1);
@@ -90,7 +91,8 @@ internal sealed class SessionCoordinatorService
         IAudioDeviceDiscovery deviceDiscovery,
         TranscriptBuffer transcriptBuffer,
         IntentDetectionService intentDetector,
-        AssistantReactionService assistantReaction)
+        AssistantReactionService assistantReaction,
+        MicAudioSettings micSettings)
     {
         _logger           = logger;
         _appState         = appState;
@@ -101,6 +103,7 @@ internal sealed class SessionCoordinatorService
         _transcriptBuffer = transcriptBuffer;
         _intentDetector   = intentDetector;
         _assistantReaction = assistantReaction;
+        _micSettings      = micSettings;
     }
 
     // ── BackgroundService ─────────────────────────────────────────────────────
@@ -404,6 +407,11 @@ internal sealed class SessionCoordinatorService
 
         try
         {
+            // ── Enumerate all audio endpoints at pipeline start ───────────────
+            // This gives us a complete picture of the audio hardware in the log.
+            if (_deviceDiscovery is Argus.Audio.Devices.WindowsAudioDeviceDiscovery winDisc)
+                winDisc.LogAllEndpoints();
+
             // ── Device discovery ────────────────────────────────────────────
             var micDevice    = _deviceDiscovery.GetDefaultInputDevice();
             var outputDevice = _deviceDiscovery.GetDefaultOutputDevice();
@@ -443,7 +451,21 @@ internal sealed class SessionCoordinatorService
             using var enumerator = new NAudio.CoreAudioApi.MMDeviceEnumerator();
             var mmMic = enumerator.GetDevice(micDevice.Id);
             micSource.SetDevice(mmMic);
-            _logger.LogInformation("[Pipeline.Start] MicrophoneCaptureSource configured: '{Device}'", micDevice.Name);
+
+            // ── Apply mic backend settings ─────────────────────────────────────
+            // Honor _micSettings.Backend exactly — never override it here.
+            //   WaveIn / Wasapi → explicit; MicrophoneCaptureSource.StartAsync will
+            //                     open exactly that backend or throw a clear error.
+            //   Auto            → MicrophoneCaptureSource.StartAsync probes both
+            //                     backends for ~1.5 s and selects the one with signal.
+            micSource.SelectedBackend    = _micSettings.Backend;
+            micSource.WaveInDeviceNumber = _micSettings.WaveInDeviceNumber;
+            micSource.WasapiContCapture  = _micSettings.Backend is MicBackend.Wasapi or MicBackend.Auto;
+
+            _logger.LogInformation(
+                "[Pipeline.Start] MicrophoneCaptureSource configured: '{Device}' " +
+                "RequestedBackend={Requested} WaveInDevice={WaveInDevice}",
+                micDevice.Name, _micSettings.Backend, _micSettings.WaveInDeviceNumber);
 
             SystemAudioCaptureSource? sysSource = null;
             if (outputDevice is not null)
@@ -464,11 +486,30 @@ internal sealed class SessionCoordinatorService
             // ── Wire pipeline ────────────────────────────────────────────────
             var pipeline = sp.GetRequiredService<ITranscriptionPipeline>();
             if (pipeline is Argus.Transcription.Pipeline.TranscriptionPipeline concrete)
+            {
                 concrete.SetSources(micSource, sysSource);
+
+                // ── Mic-only debug mode ───────────────────────────────────────
+                // Suppresses loopback while diagnosing the microphone capture path.
+                // Remove or set to false once mic is confirmed working.
+                concrete.SkipSystemAudioCapture = true;
+            }
 
             _pipeline = pipeline;
             _pipeline.StatusChanged    += OnPipelineStatusChanged;
             _pipeline.SegmentsProduced += OnSegmentsProduced;
+
+            // ── WASAPI isolation test ─────────────────────────────────────────
+            // Isolation test confirmed: fresh handle records real signal.
+            // COM/MMDevice stale-handle bug is now fixed (store ID, resolve fresh
+            // in StartAsync).  Test disabled; source quality is the new focus.
+            // Uncomment to re-run if signal disappears again.
+            //
+            // using var isoEnum  = new NAudio.CoreAudioApi.MMDeviceEnumerator();
+            // var isoDevice      = isoEnum.GetDevice(micDevice.Id);
+            // await Argus.Audio.Capture.WasapiIsolationTest.RunAsync(
+            //     isoDevice, _logger, durationSeconds: 5, ct: _pipelineStoppingCts.Token);
+            // await Task.Delay(500, CancellationToken.None).ConfigureAwait(false);
 
             _logger.LogInformation("[Pipeline.Start] Calling pipeline.StartAsync for SessionId={Id}", sessionId);
             await _pipeline.StartAsync(sessionId, _pipelineStoppingCts.Token);

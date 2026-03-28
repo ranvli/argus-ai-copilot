@@ -24,6 +24,7 @@ public partial class MainWindow : Window
     private readonly ISessionStatePublisher _statePublisher;
     private readonly IAudioStatusPublisher _audioPublisher;
     private readonly IAssistantReactionPublisher _reactionPublisher;
+    private readonly MicAudioSettings _micSettings;
 
     // Ticks every second to refresh the live session duration label.
     private readonly DispatcherTimer _durationTimer;
@@ -48,7 +49,8 @@ public partial class MainWindow : Window
         ISessionCoordinator coordinator,
         ISessionStatePublisher statePublisher,
         IAudioStatusPublisher audioPublisher,
-        IAssistantReactionPublisher reactionPublisher)
+        IAssistantReactionPublisher reactionPublisher,
+        MicAudioSettings micSettings)
     {
         _logger            = logger;
         _bootstrapper      = bootstrapper;
@@ -57,6 +59,7 @@ public partial class MainWindow : Window
         _statePublisher    = statePublisher;
         _audioPublisher    = audioPublisher;
         _reactionPublisher = reactionPublisher;
+        _micSettings       = micSettings;
 
         InitializeComponent();
 
@@ -64,12 +67,16 @@ public partial class MainWindow : Window
             "MainWindow initialized. Bootstrap complete: {IsBootstrapped}",
             _bootstrapper.IsInitialized);
 
-        // ?? Duration timer ?????????????????????????????????????????????????
+        // ?? Duration timer ????????????????????????????????????????????????????
         _durationTimer = new DispatcherTimer(DispatcherPriority.Background)
         {
             Interval = TimeSpan.FromSeconds(1)
         };
         _durationTimer.Tick += (_, _) => RefreshDurationLabel();
+
+        // ?? Populate backend override controls ????????????????????????????????
+        PopulateMicBackendComboBox();
+        PopulateWaveInDeviceComboBox();
 
         // Subscribe to session state changes
         _statePublisher.SnapshotChanged += OnSnapshotChanged;
@@ -95,7 +102,61 @@ public partial class MainWindow : Window
             _diagnostics.DiagnosticsReady += OnDiagnosticsReady;
     }
 
-    // -- Session state ---------------------------------------------------------
+    // ?? Backend override controls ?????????????????????????????????????????????
+
+    private void PopulateMicBackendComboBox()
+    {
+        MicBackendComboBox.Items.Clear();
+        MicBackendComboBox.Items.Add(MicBackend.WaveIn);
+        MicBackendComboBox.Items.Add(MicBackend.Wasapi);
+        MicBackendComboBox.Items.Add(MicBackend.Auto);
+
+        // Select current setting (default is WaveIn)
+        MicBackendComboBox.SelectedItem = _micSettings.Backend;
+    }
+
+    private void PopulateWaveInDeviceComboBox()
+    {
+        WaveInDeviceComboBox.Items.Clear();
+
+        var devices = WaveInMicrophoneBackend.EnumerateDevices();
+        if (devices.Count == 0)
+        {
+            WaveInDeviceComboBox.Items.Add("(no WaveIn devices found)");
+            WaveInDeviceComboBox.SelectedIndex = 0;
+            return;
+        }
+
+        foreach (var (index, name) in devices)
+            WaveInDeviceComboBox.Items.Add($"[{index}] {name}");
+
+        // Select current setting
+        int sel = Math.Clamp(_micSettings.WaveInDeviceNumber, 0, devices.Count - 1);
+        WaveInDeviceComboBox.SelectedIndex = sel;
+
+        _logger.LogInformation(
+            "[MainWindow] WaveIn devices enumerated: {Count}  Selected=[{Sel}] {Name}",
+            devices.Count, sel, devices[sel].Name);
+    }
+
+    private void MicBackendComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (MicBackendComboBox.SelectedItem is MicBackend backend)
+        {
+            _micSettings.Backend = backend;
+            _logger.LogInformation("[MainWindow] Mic backend override set to: {Backend}", backend);
+        }
+    }
+
+    private void WaveInDeviceComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        var idx = WaveInDeviceComboBox.SelectedIndex;
+        if (idx >= 0)
+        {
+            _micSettings.WaveInDeviceNumber = idx;
+            _logger.LogInformation("[MainWindow] WaveIn device override set to index: {Index}", idx);
+        }
+    }
 
     private void OnSnapshotChanged(object? sender, SessionStateSnapshot snap)
     {
@@ -122,6 +183,28 @@ public partial class MainWindow : Window
         };
         MicStatusText.Text  = audio.MicrophoneStatusDisplay;
         MicDeviceText.Text  = string.IsNullOrWhiteSpace(audio.MicrophoneDevice) ? "—" : audio.MicrophoneDevice;
+
+        // Active backend label (always visible so you can confirm what's running)
+        MicActiveBackendText.Text = audio.MicrophoneStatus == AudioCaptureStatus.Capturing
+            ? audio.ActiveMicBackend.ToString()
+            : "—";
+        MicActiveBackendText.Foreground = audio.ActiveMicBackend == MicBackend.WaveIn
+            ? OkBrush
+            : WarnBrush;
+
+        // Live mic level meter (only visible while capturing)
+        var isCapturing = audio.MicrophoneStatus == AudioCaptureStatus.Capturing;
+        MicLevelPanel.Visibility       = isCapturing ? Visibility.Visible : Visibility.Collapsed;
+        MicSignalDebugPanel.Visibility = isCapturing ? Visibility.Visible : Visibility.Collapsed;
+
+        if (isCapturing)
+        {
+            MicLevelText.Text       = audio.MicLevelDisplay;
+            MicLevelText.Foreground = audio.MicConvertedRms < 0.002f ? ErrorBrush
+                                    : audio.MicConvertedRms < 0.015f ? WarnBrush
+                                    : OkBrush;
+            MicSignalDebugText.Text = audio.MicSignalDebugDisplay;
+        }
 
         // System audio dot + status text
         SystemAudioDot.Fill = audio.SystemAudioStatus switch

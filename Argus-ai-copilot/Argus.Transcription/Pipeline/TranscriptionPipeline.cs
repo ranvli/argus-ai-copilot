@@ -38,6 +38,17 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
     private readonly string _debugAudioFolder;
     private static readonly bool DebugAudioEnabled = true;  // set false to disable after diagnosis
     private int _debugFileIndex;
+    private bool _dbgFirstSilentSaved;
+
+    /// <summary>
+    /// When true, system audio (loopback) capture is NOT started even if a
+    /// <see cref="SystemAudioCaptureSource"/> was injected via <see cref="SetSources"/>.
+    ///
+    /// Set this to <c>true</c> during diagnosis to isolate whether
+    /// <see cref="NAudio.Wave.WasapiLoopbackCapture"/> is triggering Windows AEC
+    /// on the microphone capture stream.
+    /// </summary>
+    public bool SkipSystemAudioCapture { get; set; } = false;
 
     // Capture sources â€” injected by the coordinator after device discovery.
     private MicrophoneCaptureSource?  _mic;
@@ -110,6 +121,7 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
         _segmentCount          = 0;
         _lastTranscriptionAt   = null;
         _lastTranscriptionError = null;
+        _dbgFirstSilentSaved   = false;
 
         // â”€â”€ Probe transcription provider once at start time â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         // This is the critical check. We resolve now so:
@@ -137,12 +149,22 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "[Pipeline.StartAsync] Microphone capture failed to start.");
+            _mic.ChunkReady -= OnChunkReady;
+            _logger.LogError(ex, "[Pipeline.StartAsync] Microphone capture FAILED to start — aborting pipeline.");
             PublishStatus(micError: ex.Message);
+            // Re-throw: the pipeline is not usable without a working microphone.
+            // SessionCoordinatorService will catch this and leave _pipeline = null.
+            throw;
         }
 
         // â”€â”€ Start system audio (best-effort) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-        if (_sysAudio is not null)
+        if (_sysAudio is not null && SkipSystemAudioCapture)
+        {
+            _logger.LogWarning(
+                "[Pipeline.StartAsync] SkipSystemAudioCapture=true -- loopback capture suppressed. " +
+                "This isolates whether WasapiLoopbackCapture triggers Windows AEC on the mic stream.");
+        }
+        else if (_sysAudio is not null)
         {
             _logger.LogInformation(
                 "[Pipeline.StartAsync] Starting system audio capture: '{Device}'", _sysAudio.DisplayName);
@@ -373,9 +395,10 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
                     peak);
             }
 
-            // ── Write debug WAV artifact (exact payload going to Whisper) ──────────
-            if (DebugAudioEnabled)
+            // ── Write debug WAV artifact only for the first silent chunk per session ──
+            if (DebugAudioEnabled && peak < 0.002f && !_dbgFirstSilentSaved)
             {
+                _dbgFirstSilentSaved = true;
                 var idx        = System.Threading.Interlocked.Increment(ref _debugFileIndex);
                 var sourceName = chunk.Source == AudioSource.Microphone ? "mic" : "sys";
                 var debugFile  = Path.Combine(
@@ -383,7 +406,7 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
                     $"{sourceName}_{idx:D4}_{DateTimeOffset.UtcNow:HHmmss}_{rms:F3}.wav");
                 WriteWav(debugFile, chunk.Data);
                 _logger.LogInformation(
-                    "[Pipeline.Debug] Saved debug WAV: {File}  (RMS={Rms:F4} Peak={Peak:F4})",
+                    "[Pipeline.Debug] Saved first-silent debug WAV: {File}  (RMS={Rms:F4} Peak={Peak:F4})",
                     debugFile, rms, peak);
             }
 
@@ -540,6 +563,9 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
             MicrophoneStatus        = _mic?.Status          ?? AudioCaptureStatus.NoDevice,
             MicrophoneDevice        = _mic?.DisplayName      ?? string.Empty,
             MicrophoneError         = micError,
+            ActiveMicBackend        = _mic?.ActiveBackend    ?? MicBackend.WaveIn,
+            MicNativeRms            = _mic?.NativeRms    ?? 0f,
+            MicConvertedRms         = _mic?.ConvertedRms  ?? 0f,
             SystemAudioStatus       = _sysAudio?.Status      ?? AudioCaptureStatus.NoDevice,
             SystemAudioDevice       = _sysAudio?.DisplayName ?? string.Empty,
             TranscriptionStatus     = transcriptionStatus,

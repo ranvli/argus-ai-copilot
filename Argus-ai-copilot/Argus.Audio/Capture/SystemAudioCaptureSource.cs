@@ -29,18 +29,25 @@ public sealed class SystemAudioCaptureSource : IAudioCaptureSource, IDisposable
     private const int TargetChannels      = 1;
     private const int TargetBitsPerSample = 16;
 
+    // Must be small so WdlResamplingSampleProvider can always fill the request
+    // from a single WASAPI callback.  4096 caused permanent silence.
+    private const int DrainBlockBytes = 512;
+
     private readonly TimeSpan _chunkDuration;
     private readonly int      _chunkBytes;
 
     private MMDevice?              _targetDevice;
     private WasapiLoopbackCapture? _capture;
     private BufferedWaveProvider?  _captureBuffer;
-    // Managed conversion chain — no MediaFoundation
     private IWaveProvider?         _pcm16Provider;
     private MemoryStream           _pcmBuffer = new();
     private Guid                   _sessionId;
     private volatile bool          _paused;
     private string?                _deviceName;
+    private WaveFormat?            _nativeFormat;
+
+    // Updated per-callback for diagnostics.
+    private float _nativeRms;
 
     // ── IAudioCaptureSource ───────────────────────────────────────────────────
 
@@ -89,11 +96,27 @@ public sealed class SystemAudioCaptureSource : IAudioCaptureSource, IDisposable
             if (_deviceName is null)
                 _deviceName = "Default Playback Device";
 
-            var nativeFormat = _capture.WaveFormat;
+            _nativeFormat = _capture.WaveFormat;
+            var nativeFormat = _nativeFormat;
+
+            // ── Device-open diagnostic ────────────────────────────────────────
+            string? loopbackDeviceId = null;
+            bool loopbackIsDefault = false;
+            try
+            {
+                using var tmpEnum = new MMDeviceEnumerator();
+                var defaultDev  = tmpEnum.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
+                loopbackDeviceId  = _targetDevice?.ID ?? defaultDev.ID;
+                loopbackIsDefault = _targetDevice is null || _targetDevice.ID == defaultDev.ID;
+            }
+            catch { /* best-effort */ }
+
             _logger.LogInformation(
-                "SystemAudioCaptureSource: device='{Device}' native={Rate}Hz/{Bits}bit/{Ch}ch  session={Id}",
-                _deviceName, nativeFormat.SampleRate, nativeFormat.BitsPerSample,
-                nativeFormat.Channels, sessionId);
+                "[SysAudio.Open] Backend=WasapiLoopback DeviceId='{DevId}' DeviceName='{Name}' " +
+                "IsDefault={IsDefault} Format={Rate}Hz/{Bits}bit/{Ch}ch SessionId={Id}",
+                loopbackDeviceId ?? "(unknown)", _deviceName, loopbackIsDefault,
+                nativeFormat.SampleRate, nativeFormat.BitsPerSample, nativeFormat.Channels,
+                sessionId);
 
             _captureBuffer = new BufferedWaveProvider(nativeFormat)
             {
@@ -192,19 +215,38 @@ public sealed class SystemAudioCaptureSource : IAudioCaptureSource, IDisposable
 
         try
         {
+            // ── Native-buffer diagnostics ─────────────────────────────────────
+            var span    = e.Buffer.AsSpan(0, e.BytesRecorded);
+            var isFloat = _nativeFormat?.Encoding == NAudio.Wave.WaveFormatEncoding.IeeeFloat;
+            var nRms    = isFloat
+                ? AudioChunkDiagnostics.ComputeRmsFloat32(span)
+                : AudioChunkDiagnostics.ComputeRms(span);
+            var nPeak   = isFloat
+                ? AudioChunkDiagnostics.ComputePeakFloat32(span)
+                : AudioChunkDiagnostics.ComputePeak(span);
+            var (nMin, nMax, nZeros) = isFloat
+                ? AudioChunkDiagnostics.ComputeMinMaxZeroFloat32(span)
+                : AudioChunkDiagnostics.ComputeMinMaxZero(span);
+            _nativeRms = nRms;
+
+            _logger.LogDebug(
+                "[SysAudioNative] Device='{Dev}' Bytes={B} RMS={R:F4} Peak={P:F4} " +
+                "Min={Min:F4} Max={Max:F4} Zeros={Z:P0}",
+                _deviceName, e.BytesRecorded, nRms, nPeak, nMin, nMax, nZeros);
+
             _captureBuffer.AddSamples(e.Buffer, 0, e.BytesRecorded);
             DrainConverter();
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "[SystemAudioSource.OnDataAvailable] Exception processing audio data. Device='{Device}'", _deviceName);
+            _logger.LogError(ex, "[SysAudio.OnDataAvailable] Exception. Device='{Dev}'", _deviceName);
         }
     }
 
     private void DrainConverter()
     {
         if (_pcm16Provider is null) return;
-        var temp = new byte[4096];
+        var temp = new byte[DrainBlockBytes];
         int read;
         while ((read = _pcm16Provider.Read(temp, 0, temp.Length)) > 0)
         {
@@ -263,17 +305,30 @@ public sealed class SystemAudioCaptureSource : IAudioCaptureSource, IDisposable
 
     private void EmitChunk(byte[] data, TimeSpan duration)
     {
-        var rms      = AudioChunkDiagnostics.ComputeRms(data);
-        var peak     = AudioChunkDiagnostics.ComputePeak(data);
-        var diagnosis = AudioChunkDiagnostics.Diagnose(rms, peak);
+        var convRms  = AudioChunkDiagnostics.ComputeRms(data);
+        var convPeak = AudioChunkDiagnostics.ComputePeak(data);
+        var (convMin, convMax, convZeroRatio) = AudioChunkDiagnostics.ComputeMinMaxZero(data);
+
+        var classification = AudioChunkDiagnostics.ClassifyChunk(_nativeRms, convPeak);
 
         _logger.LogInformation(
-            "[SysChunk] Source=SystemAudio Duration={Dur:F2}s Bytes={Bytes} " +
-            "SampleRate={Rate} Channels=1 Format=PCM16 " +
-            "RMS={Rms:F4} Peak={Peak:F4} Signal={Signal}",
-            duration.TotalSeconds, data.Length,
-            TargetSampleRate,
-            rms, peak, diagnosis);
+            "[SysChunk] Device='{Dev}' Duration={Dur:F2}s Bytes={Bytes} " +
+            "NativeRMS={NativeRms:F4} | " +
+            "ConvRMS={Rms:F4} ConvPeak={Peak:F4} ConvMin={Min:F4} ConvMax={Max:F4} ConvZeros={Zeros:P0} | " +
+            "CLASS={Class}",
+            _deviceName, duration.TotalSeconds, data.Length,
+            _nativeRms,
+            convRms, convPeak, convMin, convMax, convZeroRatio,
+            classification);
+
+        if (classification == AudioChunkClass.NativeZero)
+            _logger.LogWarning(
+                "[SysChunk] CLASS=NativeZero — loopback device '{Dev}' delivers silence. " +
+                "No audio is playing through this output device.", _deviceName);
+        else if (classification == AudioChunkClass.ConversionDestroyedAudio)
+            _logger.LogError(
+                "[SysChunk] CLASS=ConversionDestroyedAudio — native RMS={NR:F4} but conv Peak={CP:F4}.",
+                _nativeRms, convPeak);
 
         var chunk = new AudioChunk
         {

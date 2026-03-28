@@ -388,6 +388,39 @@
                     <StackPanel>
                         <TextBlock Text="Audio Capture" Style="{StaticResource SectionHeader}"/>
 
+                        <!-- ── Backend override controls ─────────────────── -->
+                        <Border Background="#FFF8E1" BorderBrush="#FFD54F" BorderThickness="1"
+                                CornerRadius="4" Padding="10,8" Margin="0,0,0,10">
+                            <StackPanel>
+                                <TextBlock Text="⚙ Backend Override"
+                                           FontSize="11" FontWeight="SemiBold"
+                                           Foreground="#E65100" Margin="0,0,0,6"/>
+
+                                <!-- Mic backend selector -->
+                                <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
+                                    <TextBlock Text="Mic backend"
+                                               Style="{StaticResource StatusLabel}" FontSize="11"/>
+                                    <ComboBox x:Name="MicBackendComboBox"
+                                              Width="140" FontSize="11"
+                                              SelectionChanged="MicBackendComboBox_SelectionChanged"/>
+                                </StackPanel>
+
+                                <!-- WaveIn device selector -->
+                                <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
+                                    <TextBlock Text="WaveIn device"
+                                               Style="{StaticResource StatusLabel}" FontSize="11"/>
+                                    <ComboBox x:Name="WaveInDeviceComboBox"
+                                              Width="260" FontSize="11"
+                                              SelectionChanged="WaveInDeviceComboBox_SelectionChanged"/>
+                                </StackPanel>
+
+                                <TextBlock x:Name="BackendOverrideHintText"
+                                           Text="Changes take effect on the next session start."
+                                           FontSize="10" Foreground="#795548"
+                                           FontStyle="Italic"/>
+                            </StackPanel>
+                        </Border>
+
                         <!-- Microphone status -->
                         <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
                             <Ellipse x:Name="MicDot" Width="10" Height="10"
@@ -399,13 +432,45 @@
                         </StackPanel>
 
                         <!-- Microphone device name -->
-                        <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
                             <TextBlock Width="18" Margin="0,0,8,0"/>
                             <TextBlock Text="Device" Style="{StaticResource StatusLabel}"/>
                             <TextBlock x:Name="MicDeviceText" Text="—"
                                        FontSize="11" FontFamily="Consolas"
                                        Foreground="#616161" VerticalAlignment="Center"
                                        TextWrapping="Wrap"/>
+                        </StackPanel>
+
+                        <!-- Active backend row (shown while capturing) -->
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                            <TextBlock Width="18" Margin="0,0,8,0"/>
+                            <TextBlock Text="Active backend" Style="{StaticResource StatusLabel}"/>
+                            <TextBlock x:Name="MicActiveBackendText" Text="—"
+                                       FontSize="11" FontFamily="Consolas"
+                                       FontWeight="SemiBold"
+                                       Foreground="#1565C0" VerticalAlignment="Center"/>
+                        </StackPanel>
+
+                        <!-- Microphone live signal level -->
+                        <StackPanel x:Name="MicLevelPanel"
+                                    Orientation="Horizontal" Margin="0,0,0,4"
+                                    Visibility="Collapsed">
+                            <TextBlock Width="18" Margin="0,0,8,0"/>
+                            <TextBlock Text="Level" Style="{StaticResource StatusLabel}"/>
+                            <TextBlock x:Name="MicLevelText"
+                                       FontSize="11" FontFamily="Consolas"
+                                       Foreground="#2E7D32" VerticalAlignment="Center"/>
+                        </StackPanel>
+
+                        <!-- Microphone native vs converted RMS (debug) -->
+                        <StackPanel x:Name="MicSignalDebugPanel"
+                                    Orientation="Horizontal" Margin="0,0,0,8"
+                                    Visibility="Collapsed">
+                            <TextBlock Width="18" Margin="0,0,8,0"/>
+                            <TextBlock Text="Signal" Style="{StaticResource StatusLabel}"/>
+                            <TextBlock x:Name="MicSignalDebugText"
+                                       FontSize="10" FontFamily="Consolas"
+                                       Foreground="#757575" VerticalAlignment="Center"/>
                         </StackPanel>
 
                         <!-- System audio status -->

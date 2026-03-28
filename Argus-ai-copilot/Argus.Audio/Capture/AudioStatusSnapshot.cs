@@ -13,6 +13,15 @@ public sealed class AudioStatusSnapshot
     public string  MicrophoneDevice             { get; init; } = string.Empty;
     public string? MicrophoneError              { get; init; }
 
+    /// <summary>Which backend is actively capturing microphone audio.</summary>
+    public MicBackend ActiveMicBackend { get; init; } = MicBackend.WaveIn;
+
+    /// <summary>RMS of the most-recent native (pre-conversion) buffer. 0 when idle.</summary>
+    public float MicNativeRms    { get; init; }
+
+    /// <summary>RMS of the most-recent converted PCM16 chunk sent to Whisper. 0 when idle.</summary>
+    public float MicConvertedRms { get; init; }
+
     // ── System audio ──────────────────────────────────────────────────────────
 
     public AudioCaptureStatus SystemAudioStatus { get; init; } = AudioCaptureStatus.NoDevice;
@@ -65,6 +74,35 @@ public sealed class AudioStatusSnapshot
         AudioCaptureStatus.NoDevice    => "⚠ No microphone found",
         _                              => "Idle"
     };
+
+    /// <summary>
+    /// A compact level meter string for the UI, e.g. "█████░░░░░  RMS 0.082".
+    /// Returns empty string when not capturing.
+    /// </summary>
+    public string MicLevelDisplay
+    {
+        get
+        {
+            if (MicrophoneStatus != AudioCaptureStatus.Capturing) return string.Empty;
+            var rms    = MicConvertedRms;
+            var filled = Math.Clamp((int)Math.Round(rms * 50), 0, 10);
+            var bar    = new string('█', filled) + new string('░', 10 - filled);
+            var label  = rms < 0.002f ? "SILENT" : $"RMS {rms:F3}";
+            return $"{bar}  {label}";
+        }
+    }
+
+    /// <summary>
+    /// One-line native vs converted RMS summary for debugging.
+    /// </summary>
+    public string MicSignalDebugDisplay
+    {
+        get
+        {
+            if (MicrophoneStatus != AudioCaptureStatus.Capturing) return string.Empty;
+            return $"[{ActiveMicBackend}]  native {MicNativeRms:F4}  →  conv {MicConvertedRms:F4}";
+        }
+    }
 
     public string SystemAudioStatusDisplay => SystemAudioStatus switch
     {
