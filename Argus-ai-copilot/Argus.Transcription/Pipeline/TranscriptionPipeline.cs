@@ -74,6 +74,14 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
     private int                      _segmentCount;
     private DateTimeOffset?          _lastTranscriptionAt;
     private string?                  _lastTranscriptionError;
+    private AudioChunk?              _pendingMicChunk;
+
+    private const float ChunkNormalizationTargetPeak = 0.45f;
+    private const float ChunkNormalizationMinPeak = 0.03f;
+    private const float ChunkNormalizationMinRms  = 0.004f;
+    private const float ChunkNormalizationMaxGain = 6.0f;
+    private const float MicLowActivityPeakThreshold = 0.025f;
+    private const float MicLowActivityRmsThreshold  = 0.003f;
 
     // â”€â”€ ITranscriptionPipeline â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -122,6 +130,7 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
         _lastTranscriptionAt   = null;
         _lastTranscriptionError = null;
         _dbgFirstSilentSaved   = false;
+        _pendingMicChunk       = null;
 
         // â”€â”€ Probe transcription provider once at start time â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         // This is the critical check. We resolve now so:
@@ -361,6 +370,18 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
 
     private async Task ProcessChunkAsync(AudioChunk chunk, CancellationToken ct)
     {
+        if (chunk.Source == AudioSource.Microphone)
+        {
+            var decision = StageMicrophoneChunk(chunk);
+            if (decision is null)
+            {
+                PublishStatus(transcriptionStatus: TranscriptionPipelineStatus.Idle);
+                return;
+            }
+
+            chunk = decision;
+        }
+
         // If provider was not resolved at start, set NoProvider status clearly and return.
         if (_transcriptionModel is null)
         {
@@ -376,47 +397,66 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
         try
         {
             // ── Per-chunk diagnostics ───────────────────────────────────────────
-            var rms      = AudioChunkDiagnostics.ComputeRms(chunk.Data);
-            var peak     = AudioChunkDiagnostics.ComputePeak(chunk.Data);
-            var diagnosis = AudioChunkDiagnostics.Diagnose(rms, peak);
+            var inputRms   = AudioChunkDiagnostics.ComputeRms(chunk.Data);
+            var inputPeak  = AudioChunkDiagnostics.ComputePeak(chunk.Data);
+            var diagnosis  = AudioChunkDiagnostics.Diagnose(inputRms, inputPeak);
+            var whisperPcm = NormalizeChunkForWhisper(chunk.Data, out var appliedGain, out var outputRms, out var outputPeak);
+            var whisperDuration = TimeSpan.FromSeconds((double)whisperPcm.Length / (16_000 * 2));
 
             _logger.LogInformation(
                 "[Pipeline.ChunkDiag] ChunkId={Id} Source={Source} Duration={Dur:F2}s " +
                 "Bytes={Bytes} SampleRate=16000 Channels=1 Format=PCM16 " +
                 "RMS={Rms:F4} Peak={Peak:F4} Signal=[{Signal}]",
                 chunk.Id, chunk.Source, chunk.Duration.TotalSeconds,
-                chunk.Data.Length, rms, peak, diagnosis);
+                chunk.Data.Length, inputRms, inputPeak, diagnosis);
 
-            if (peak < 0.002f)
+            if (inputPeak < 0.002f)
             {
                 _logger.LogWarning(
                     "[Pipeline.ChunkDiag] SILENT CHUNK — peak={Peak:F4} is effectively zero. " +
                     "Audio conversion may be broken. Check log for '[MicChunk]' or '[SysChunk]' entries above.",
-                    peak);
+                    inputPeak);
             }
 
             // ── Write debug WAV artifact only for the first silent chunk per session ──
-            if (DebugAudioEnabled && peak < 0.002f && !_dbgFirstSilentSaved)
+            if (DebugAudioEnabled && inputPeak < 0.002f && !_dbgFirstSilentSaved)
             {
                 _dbgFirstSilentSaved = true;
                 var idx        = System.Threading.Interlocked.Increment(ref _debugFileIndex);
                 var sourceName = chunk.Source == AudioSource.Microphone ? "mic" : "sys";
                 var debugFile  = Path.Combine(
                     _debugAudioFolder,
-                    $"{sourceName}_{idx:D4}_{DateTimeOffset.UtcNow:HHmmss}_{rms:F3}.wav");
-                WriteWav(debugFile, chunk.Data);
+                    $"{sourceName}_{idx:D4}_{DateTimeOffset.UtcNow:HHmmss}_{inputRms:F3}.wav");
+                WriteWav(debugFile, whisperPcm);
                 _logger.LogInformation(
                     "[Pipeline.Debug] Saved first-silent debug WAV: {File}  (RMS={Rms:F4} Peak={Peak:F4})",
-                    debugFile, rms, peak);
+                    debugFile, inputRms, inputPeak);
             }
 
             PublishStatus(transcriptionStatus: TranscriptionPipelineStatus.Transcribing);
-            WriteWav(tempFile, chunk.Data);
+            WriteWav(tempFile, whisperPcm);
+
+            _logger.LogInformation(
+                "[ChunkGain] inputRms={InputRms:F4} inputPeak={InputPeak:F4} appliedGain={Gain:F2} outputRms={OutputRms:F4} outputPeak={OutputPeak:F4}",
+                inputRms,
+                inputPeak,
+                appliedGain,
+                outputRms,
+                outputPeak);
+
+            _logger.LogInformation(
+                "[Pipeline.WhisperInput] ChunkId={Id} action=sent wavDuration={Duration:F2}s inputRms={InputRms:F4} inputPeak={InputPeak:F4} outputRms={OutputRms:F4} outputPeak={OutputPeak:F4}",
+                chunk.Id,
+                whisperDuration.TotalSeconds,
+                inputRms,
+                inputPeak,
+                outputRms,
+                outputPeak);
 
             _logger.LogInformation(
                 "[Pipeline.TxRequest] Sending chunk to provider. ChunkId={Id} Source={Source} " +
                 "Duration={Dur:F1}s Provider={Provider} ModelId={ModelId} TempFile={File}",
-                chunk.Id, chunk.Source, chunk.Duration.TotalSeconds,
+                chunk.Id, chunk.Source, whisperDuration.TotalSeconds,
                 _transcriptionProvider, _transcriptionModelId, tempFile);
 
             var request = new TranscriptionRequest
@@ -526,6 +566,118 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
     {
         using var writer = new WaveFileWriter(path, new WaveFormat(16_000, 16, 1));
         writer.Write(pcm16kMono16bit, 0, pcm16kMono16bit.Length);
+    }
+
+    private AudioChunk? StageMicrophoneChunk(AudioChunk chunk)
+    {
+        var rms  = AudioChunkDiagnostics.ComputeRms(chunk.Data);
+        var peak = AudioChunkDiagnostics.ComputePeak(chunk.Data);
+        var lowActivity = rms < MicLowActivityRmsThreshold && peak < MicLowActivityPeakThreshold;
+
+        if (_pendingMicChunk is null)
+        {
+            if (!lowActivity)
+            {
+                _logger.LogInformation(
+                    "[Pipeline.WhisperInput] ChunkId={Id} action=sent reason=activity_ok duration={Duration:F2}s rms={Rms:F4} peak={Peak:F4}",
+                    chunk.Id,
+                    chunk.Duration.TotalSeconds,
+                    rms,
+                    peak);
+                return chunk;
+            }
+
+            _pendingMicChunk = chunk;
+            _logger.LogInformation(
+                "[Pipeline.WhisperInput] ChunkId={Id} action=skipped reason=low_activity awaiting_merge=true duration={Duration:F2}s rms={Rms:F4} peak={Peak:F4}",
+                chunk.Id,
+                chunk.Duration.TotalSeconds,
+                rms,
+                peak);
+            return null;
+        }
+
+        var merged = MergeChunks(_pendingMicChunk, chunk);
+        _pendingMicChunk = null;
+
+        var mergedRms  = AudioChunkDiagnostics.ComputeRms(merged.Data);
+        var mergedPeak = AudioChunkDiagnostics.ComputePeak(merged.Data);
+        var mergedLowActivity = mergedRms < MicLowActivityRmsThreshold && mergedPeak < MicLowActivityPeakThreshold;
+
+        if (mergedLowActivity && merged.Duration < TimeSpan.FromSeconds(10))
+        {
+            _pendingMicChunk = merged;
+            _logger.LogInformation(
+                "[Pipeline.WhisperInput] ChunkId={Id} action=merged reason=still_low_activity awaiting_merge=true duration={Duration:F2}s rms={Rms:F4} peak={Peak:F4}",
+                merged.Id,
+                merged.Duration.TotalSeconds,
+                mergedRms,
+                mergedPeak);
+            return null;
+        }
+
+        _logger.LogInformation(
+            "[Pipeline.WhisperInput] ChunkId={Id} action=merged reason=send duration={Duration:F2}s rms={Rms:F4} peak={Peak:F4}",
+            merged.Id,
+            merged.Duration.TotalSeconds,
+            mergedRms,
+            mergedPeak);
+        return merged;
+    }
+
+    private static AudioChunk MergeChunks(AudioChunk first, AudioChunk second)
+    {
+        var mergedData = new byte[first.Data.Length + second.Data.Length];
+        Buffer.BlockCopy(first.Data, 0, mergedData, 0, first.Data.Length);
+        Buffer.BlockCopy(second.Data, 0, mergedData, first.Data.Length, second.Data.Length);
+
+        return new AudioChunk
+        {
+            SessionId = first.SessionId,
+            CapturedAt = first.CapturedAt,
+            Duration = first.Duration + second.Duration,
+            Source = first.Source,
+            Data = mergedData
+        };
+    }
+
+    private static byte[] NormalizeChunkForWhisper(
+        byte[] pcm16,
+        out float appliedGain,
+        out float outputRms,
+        out float outputPeak)
+    {
+        var inputRms = AudioChunkDiagnostics.ComputeRms(pcm16);
+        var inputPeak = AudioChunkDiagnostics.ComputePeak(pcm16);
+
+        appliedGain = 1f;
+        if (inputPeak >= ChunkNormalizationMinPeak &&
+            inputRms >= ChunkNormalizationMinRms &&
+            inputPeak < ChunkNormalizationTargetPeak)
+        {
+            appliedGain = MathF.Min(ChunkNormalizationTargetPeak / inputPeak, ChunkNormalizationMaxGain);
+        }
+
+        if (appliedGain <= 1.01f)
+        {
+            outputRms = inputRms;
+            outputPeak = inputPeak;
+            return pcm16;
+        }
+
+        var normalized = new byte[pcm16.Length];
+        for (int i = 0; i + 1 < pcm16.Length; i += 2)
+        {
+            var sample = (short)(pcm16[i] | (pcm16[i + 1] << 8));
+            var boosted = Math.Clamp((int)MathF.Round(sample * appliedGain), short.MinValue, short.MaxValue);
+            var result = (short)boosted;
+            normalized[i] = (byte)(result & 0xFF);
+            normalized[i + 1] = (byte)((result >> 8) & 0xFF);
+        }
+
+        outputRms = AudioChunkDiagnostics.ComputeRms(normalized);
+        outputPeak = AudioChunkDiagnostics.ComputePeak(normalized);
+        return normalized;
     }
 
     private List<TranscriptSegment> StampSegments(IReadOnlyList<TranscriptSegment> raw, AudioChunk chunk)

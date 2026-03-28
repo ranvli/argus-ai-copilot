@@ -201,7 +201,7 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
     public MicrophoneCaptureSource(ILogger<MicrophoneCaptureSource> logger, TimeSpan? chunkDuration = null)
     {
         _logger        = logger;
-        _chunkDuration = chunkDuration ?? TimeSpan.FromSeconds(2);
+        _chunkDuration = chunkDuration ?? TimeSpan.FromSeconds(5);
         _chunkBytes    = TargetSampleRate
                        * TargetChannels
                        * (TargetBitsPerSample / 8)
