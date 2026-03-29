@@ -8,4 +8,6 @@ public interface ITranscriptionModel
     string ModelId { get; }
 
     Task<TranscriptionResponse> TranscribeAsync(TranscriptionRequest request, CancellationToken ct = default);
+
+    bool SupportsInMemoryAudio => false;
 }

@@ -449,6 +449,7 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
         }
 
         var tempFile = Path.Combine(Path.GetTempPath(), $"argus_{chunk.Id:N}.wav");
+        var canUseInMemoryAudio = _transcriptionModel.SupportsInMemoryAudio;
 
         try
         {
@@ -490,10 +491,13 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
             }
 
             PublishStatus(transcriptionStatus: TranscriptionPipelineStatus.Transcribing);
-            var wavWriteStopwatch = Stopwatch.StartNew();
-            WriteWav(tempFile, whisperPcm);
-            wavWriteStopwatch.Stop();
-            wavWriteMs = wavWriteStopwatch.Elapsed.TotalMilliseconds;
+            if (!canUseInMemoryAudio)
+            {
+                var wavWriteStopwatch = Stopwatch.StartNew();
+                WriteWav(tempFile, whisperPcm);
+                wavWriteStopwatch.Stop();
+                wavWriteMs = wavWriteStopwatch.Elapsed.TotalMilliseconds;
+            }
 
             _logger.LogDebug(
                 "[ChunkGain] inputRms={InputRms:F4} inputPeak={InputPeak:F4} appliedGain={Gain:F2} outputRms={OutputRms:F4} outputPeak={OutputPeak:F4}",
@@ -533,7 +537,11 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
 
             var request = new TranscriptionRequest
             {
-                AudioFilePath  = tempFile,
+                AudioFilePath  = canUseInMemoryAudio ? string.Empty : tempFile,
+                AudioPcm16     = whisperPcm,
+                AudioSampleRate = 16_000,
+                AudioChannels  = 1,
+                PreferInMemoryAudio = canUseInMemoryAudio,
                 Language       = requestLanguage,
                 WordTimestamps = false
             };

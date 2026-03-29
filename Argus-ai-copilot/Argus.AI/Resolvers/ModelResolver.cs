@@ -115,7 +115,8 @@ internal sealed class ModelResolver : IModelResolver
             (nameof(ITranscriptionModel),"LOCALAI")          => (T)(object)new OpenAiTranscriptionModel(profile, _httpFactory, _loggerFactory.CreateLogger<OpenAiTranscriptionModel>()),
             (nameof(ITranscriptionModel),"OPENAI_COMPATIBLE") => (T)(object)new OpenAiTranscriptionModel(profile, _httpFactory, _loggerFactory.CreateLogger<OpenAiTranscriptionModel>()),
             // Fully local Whisper.net transcription — no cloud dependency
-            (nameof(ITranscriptionModel),"WHISPERNET")       => BuildLocalWhisper<T>(profile),
+            (nameof(ITranscriptionModel),"WHISPERNET")       => BuildLocalTranscription<T>(profile),
+            (nameof(ITranscriptionModel),"SHERPAONNX")       => BuildLocalTranscription<T>(profile),
             (nameof(IEmbeddingModel),    "OLLAMA")           => (T)(object)new OllamaEmbeddingModel(profile, _httpFactory, _loggerFactory.CreateLogger<OllamaEmbeddingModel>()),
             _ => throw new NotSupportedException(
                 $"No implementation for capability '{typeof(T).Name}' with provider '{provider}'. " +
@@ -123,13 +124,17 @@ internal sealed class ModelResolver : IModelResolver
         };
     }
 
-    private T BuildLocalWhisper<T>(ProviderProfile profile) where T : class
+    private T BuildLocalTranscription<T>(ProviderProfile profile) where T : class
     {
         if (_localTxFactory is null)
             throw new InvalidOperationException(
-                $"Provider=WhisperNet requires ILocalTranscriptionModelFactory to be registered. " +
+                $"Provider={profile.Provider} requires ILocalTranscriptionModelFactory to be registered. " +
                 $"Call AddArgusTranscription() before AddArgusAI() in your DI setup. " +
                 $"Profile='{profile.Name}'");
+
+        if (!_localTxFactory.CanCreate(profile))
+            throw new NotSupportedException(
+                $"ILocalTranscriptionModelFactory cannot create Provider={profile.Provider} Profile='{profile.Name}' ModelId='{profile.ModelId}'.");
 
         return (T)_localTxFactory.Create(profile);
     }

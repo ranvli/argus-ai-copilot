@@ -17,4 +17,6 @@ public interface ILocalTranscriptionModelFactory
     /// WhisperNet provider profile.
     /// </summary>
     ITranscriptionModel Create(ProviderProfile profile);
+
+    bool CanCreate(ProviderProfile profile);
 }

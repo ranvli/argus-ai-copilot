@@ -3,6 +3,7 @@ using Argus.Audio;
 using Argus.Audio.Capture;
 using Argus.Transcription.Intent;
 using Argus.Transcription.Pipeline;
+using Argus.Transcription.SherpaOnnx;
 using Argus.Transcription.Whisper;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -23,10 +24,11 @@ public static class TranscriptionServiceExtensions
         // Whisper model service — singleton so the factory is created once and the
         // WhisperFactory instance (with its loaded model) is reused across calls.
         services.AddSingleton<WhisperModelService>();
+        services.AddSingleton<SherpaOnnxModelService>();
 
-        // Factory bridge — lets ModelResolver (in Argus.AI) create WhisperLocalTranscriptionModel
-        // instances without taking a project dependency on Argus.Transcription.
-        services.AddSingleton<ILocalTranscriptionModelFactory, WhisperTranscriptionModelFactory>();
+        // Factory bridge — lets ModelResolver (in Argus.AI) create local transcription
+        // backends without taking a project dependency on Argus.Transcription.
+        services.AddSingleton<ILocalTranscriptionModelFactory, LocalTranscriptionModelFactory>();
 
         // Transcript buffer — singleton rolling window of recent segments
         services.AddSingleton<TranscriptBuffer>();

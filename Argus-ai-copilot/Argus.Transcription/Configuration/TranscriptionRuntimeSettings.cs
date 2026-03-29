@@ -25,4 +25,14 @@ public sealed class TranscriptionRuntimeSettings
     /// Disabled by default while forced-language diagnosis is in use.
     /// </summary>
     public bool EnableAutoLanguageProbe { get; set; } = false;
+
+    /// <summary>
+    /// Enables partial transcript emission for streaming/local backends that support it.
+    /// </summary>
+    public bool EnablePartialTranscripts { get; set; } = true;
+
+    /// <summary>
+    /// Root folder for embedded sherpa-onnx models.
+    /// </summary>
+    public string SherpaModelsRoot { get; set; } = string.Empty;
 }

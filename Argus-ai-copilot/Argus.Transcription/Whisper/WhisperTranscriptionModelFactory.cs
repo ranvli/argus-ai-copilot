@@ -30,6 +30,9 @@ internal sealed class WhisperTranscriptionModelFactory : ILocalTranscriptionMode
         _loggerFactory = loggerFactory;
     }
 
+    public bool CanCreate(ProviderProfile profile)
+        => profile.Provider.Equals("WhisperNet", StringComparison.OrdinalIgnoreCase);
+
     public ITranscriptionModel Create(ProviderProfile profile)
     {
         lock (_lock)

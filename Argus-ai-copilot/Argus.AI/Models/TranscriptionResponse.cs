@@ -12,6 +12,9 @@ public sealed class TranscriptionResponse
 
     public string? ModelUsed { get; init; }
     public string? DetectedLanguage { get; init; }
+    public string? Runtime { get; init; }
+    public bool UsedInMemoryAudio { get; init; }
+    public bool IsPartial { get; init; }
     public bool IsError { get; init; }
     public string? ErrorMessage { get; init; }
 
