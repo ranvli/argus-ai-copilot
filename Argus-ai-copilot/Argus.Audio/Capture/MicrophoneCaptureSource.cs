@@ -44,10 +44,25 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
     // from a single WASAPI callback.  256 output PCM16 samples = 512 bytes.
     private const int DrainBlockBytes = 512;
     private const int StartupValidationCallbackCount = 5;
+    private const int WasapiStartupValidationCallbackCount = 7;
+    private const int WasapiStartupIgnoredInitialDeadCallbacks = 2;
     private const int StartupRetryCount = 2;
     private static readonly TimeSpan StartupValidationTimeout = TimeSpan.FromSeconds(1.5);
+    private static readonly TimeSpan WasapiStartupValidationTimeout = TimeSpan.FromSeconds(2.25);
+    private static readonly TimeSpan WasapiStartupRetryValidationTimeout = TimeSpan.FromSeconds(3.0);
     private const float DeadChunkRmsThreshold = 0.0015f;
     private const float DeadChunkPeakThreshold = 0.005f;
+
+    private readonly record struct StartupValidationDecision(
+        bool Healthy,
+        string Reason,
+        bool Retryable,
+        int ObservedCallbacks,
+        int EffectiveCallbacks,
+        int EffectiveDeadCallbacks,
+        int IgnoredWarmupDeadCallbacks,
+        float EffectiveAverageRms,
+        float EffectiveAveragePeak);
 
     private sealed class StartupCallbackBufferEntry
     {
@@ -165,8 +180,10 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
     private float _startupCallbackPeakTotal;
     private long _startupBytesReceived;
     private volatile bool _startupValidationPending;
-    private TaskCompletionSource<bool>? _startupValidationTcs;
+    private TaskCompletionSource<StartupValidationDecision>? _startupValidationTcs;
     private readonly List<StartupCallbackBufferEntry> _startupBufferedCallbacks = [];
+    private readonly List<(float Rms, float Peak)> _startupSignalSamples = [];
+    private int _startupValidationAttempt;
     private bool _startupRawHadSignal;
     private int _callbackBoundarySequence;
     private bool _startupUnexpectedRecordingStopped;
@@ -596,7 +613,16 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
             if (_startupValidationPending)
             {
                 _startupFailureException = ex;
-                _startupValidationTcs?.TrySetResult(false);
+                _startupValidationTcs?.TrySetResult(new StartupValidationDecision(
+                    Healthy: false,
+                    Reason: "startup_exception",
+                    Retryable: false,
+                    ObservedCallbacks: _startupCallbackCount,
+                    EffectiveCallbacks: _startupCallbackCount,
+                    EffectiveDeadCallbacks: _startupDeadCallbackCount,
+                    IgnoredWarmupDeadCallbacks: 0,
+                    EffectiveAverageRms: _startupCallbackCount > 0 ? _startupCallbackRmsTotal / _startupCallbackCount : 0f,
+                    EffectiveAveragePeak: _startupCallbackCount > 0 ? _startupCallbackPeakTotal / _startupCallbackCount : 0f));
             }
             _logger.LogError(ex, "[MicSource.OnDataAvailable] Exception. Device='{Device}'", _deviceName);
         }
@@ -631,7 +657,16 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
             {
                 _startupFailureException = e.Exception;
                 _startupUnexpectedRecordingStopped = true;
-                _startupValidationTcs?.TrySetResult(false);
+                _startupValidationTcs?.TrySetResult(new StartupValidationDecision(
+                    Healthy: false,
+                    Reason: "unexpected_recording_stop",
+                    Retryable: false,
+                    ObservedCallbacks: _startupCallbackCount,
+                    EffectiveCallbacks: _startupCallbackCount,
+                    EffectiveDeadCallbacks: _startupDeadCallbackCount,
+                    IgnoredWarmupDeadCallbacks: 0,
+                    EffectiveAverageRms: _startupCallbackCount > 0 ? _startupCallbackRmsTotal / _startupCallbackCount : 0f,
+                    EffectiveAveragePeak: _startupCallbackCount > 0 ? _startupCallbackPeakTotal / _startupCallbackCount : 0f));
             }
 
             Status = AudioCaptureStatus.DeviceError;
@@ -647,7 +682,16 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
                 _startupUnexpectedRecordingStopped = true;
                 _startupFailureException ??= new InvalidOperationException(
                     $"Microphone recording stopped unexpectedly during startup on device '{_deviceName}'.");
-                _startupValidationTcs?.TrySetResult(false);
+                _startupValidationTcs?.TrySetResult(new StartupValidationDecision(
+                    Healthy: false,
+                    Reason: "unexpected_recording_stop",
+                    Retryable: false,
+                    ObservedCallbacks: _startupCallbackCount,
+                    EffectiveCallbacks: _startupCallbackCount,
+                    EffectiveDeadCallbacks: _startupDeadCallbackCount,
+                    IgnoredWarmupDeadCallbacks: 0,
+                    EffectiveAverageRms: _startupCallbackCount > 0 ? _startupCallbackRmsTotal / _startupCallbackCount : 0f,
+                    EffectiveAveragePeak: _startupCallbackCount > 0 ? _startupCallbackPeakTotal / _startupCallbackCount : 0f));
             }
 
             _logger.LogInformation(
@@ -898,6 +942,17 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
 
         while (true)
         {
+            var lastDecision = new StartupValidationDecision(
+                Healthy: false,
+                Reason: "startup_not_evaluated",
+                Retryable: true,
+                ObservedCallbacks: 0,
+                EffectiveCallbacks: 0,
+                EffectiveDeadCallbacks: 0,
+                IgnoredWarmupDeadCallbacks: 0,
+                EffectiveAverageRms: 0f,
+                EffectiveAveragePeak: 0f);
+
             for (int attempt = 0; attempt <= StartupRetryCount; attempt++)
             {
                 ct.ThrowIfCancellationRequested();
@@ -906,32 +961,57 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
                 if (currentBackend == MicBackend.WaveIn)
                     _waveInRequestedSampleRate = attempt == 0 ? 44_100 : 16_000;
 
-                BeginStartupValidation();
+                BeginStartupValidation(attempt);
+
+                var validationTimeout = GetStartupValidationTimeout(currentBackend, attempt);
+                _logger.LogInformation(
+                    "[MicStartupValidationConfig] backend={Backend} attempt={Attempt} timeout={Timeout:F2}s requiredCallbacks={RequiredCallbacks} ignoredInitialDeadCallbacks={IgnoredDeadCallbacks} deadRmsThreshold={DeadRmsThreshold:F4} deadPeakThreshold={DeadPeakThreshold:F4}",
+                    BackendName(currentBackend),
+                    attempt + 1,
+                    validationTimeout.TotalSeconds,
+                    GetRequiredStartupValidationCallbacks(currentBackend, attempt),
+                    GetStartupIgnoredInitialDeadCallbacks(currentBackend, attempt),
+                    DeadChunkRmsThreshold,
+                    DeadChunkPeakThreshold);
 
                 if (currentBackend == MicBackend.WaveIn)
                     await StartWaveInAsync(sessionId).ConfigureAwait(false);
                 else
                     await StartWasapiAsync(sessionId).ConfigureAwait(false);
 
-                var startupTask = _startupValidationTcs?.Task ?? Task.FromResult(true);
-                var completed = await Task.WhenAny(startupTask, Task.Delay(StartupValidationTimeout, ct)).ConfigureAwait(false);
-                var startupHealthy = completed == startupTask
+                var startupTask = _startupValidationTcs?.Task ?? Task.FromResult(new StartupValidationDecision(
+                    Healthy: true,
+                    Reason: "validation_not_required",
+                    Retryable: false,
+                    ObservedCallbacks: 0,
+                    EffectiveCallbacks: 0,
+                    EffectiveDeadCallbacks: 0,
+                    IgnoredWarmupDeadCallbacks: 0,
+                    EffectiveAverageRms: 0f,
+                    EffectiveAveragePeak: 0f));
+                var completed = await Task.WhenAny(startupTask, Task.Delay(validationTimeout, ct)).ConfigureAwait(false);
+                var startupDecision = completed == startupTask
                     ? await startupTask.ConfigureAwait(false)
                     : CompleteStartupValidationAfterTimeout();
 
-                if (currentBackend == MicBackend.WaveIn)
-                    LogWaveInRuntimeStartup(startupHealthy, !startupHealthy && attempt == 0);
+                lastDecision = startupDecision;
 
-                if (startupHealthy)
+                if (currentBackend == MicBackend.WaveIn)
+                    LogWaveInRuntimeStartup(startupDecision.Healthy, !startupDecision.Healthy && attempt == 0);
+
+                if (startupDecision.Healthy)
                     return;
 
                 await StopCurrentBackendAsync().ConfigureAwait(false);
 
                 if (attempt < StartupRetryCount)
                 {
+                    if (!startupDecision.Retryable)
+                        break;
+
                     _logger.LogWarning(
-                        "[MicSource.StartupRetry] backend={Backend} attempt={Attempt} reason=startup_dead",
-                        BackendName(currentBackend), attempt + 1);
+                        "[MicSource.StartupRetry] backend={Backend} attempt={Attempt} reason={Reason} retryable={Retryable}",
+                        BackendName(currentBackend), attempt + 1, startupDecision.Reason, startupDecision.Retryable);
                     continue;
                 }
 
@@ -942,7 +1022,7 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
             {
                 Status = AudioCaptureStatus.DeviceError;
                 throw new InvalidOperationException(
-                    $"Microphone startup failed. Backend={BackendName(currentBackend)} remained dead after {StartupRetryCount + 1} startup attempts.");
+                    $"Microphone startup failed. Backend={BackendName(currentBackend)} remained unavailable after {StartupRetryCount + 1} startup attempts. LastReason={lastDecision.Reason}. ObservedCallbacks={lastDecision.ObservedCallbacks}. EffectiveCallbacks={lastDecision.EffectiveCallbacks}. Explicit backend selection prevents automatic fallback.");
             }
 
             var nextBackend = currentBackend == MicBackend.WaveIn ? MicBackend.Wasapi : MicBackend.WaveIn;
@@ -955,11 +1035,12 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
         }
     }
 
-    private void BeginStartupValidation()
+    private void BeginStartupValidation(int attempt)
     {
         ResetStartupValidationState();
+        _startupValidationAttempt = attempt;
         _startupValidationPending = true;
-        _startupValidationTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _startupValidationTcs = new TaskCompletionSource<StartupValidationDecision>(TaskCreationOptions.RunContinuationsAsynchronously);
     }
 
     private void ObserveStartupCallback(float rms, float peak, int bytesRecorded)
@@ -971,66 +1052,93 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
         _startupCallbackRmsTotal += rms;
         _startupCallbackPeakTotal += peak;
         _startupBytesReceived += bytesRecorded;
+        _startupSignalSamples.Add((rms, peak));
 
         if (IsClearlyDeadChunk(rms, peak))
             _startupDeadCallbackCount++;
 
-        if (_startupCallbackCount < StartupValidationCallbackCount)
+        if (_startupCallbackCount < GetRequiredStartupValidationCallbacks(ActiveBackend, _startupValidationAttempt))
             return;
 
-        var (healthy, reason) = EvaluateStartupStreamHealth();
-        CompleteStartupValidation(healthy, reason);
+        var decision = EvaluateStartupStreamHealth();
+        if (!decision.Healthy && decision.Reason == "warming_up")
+            return;
+
+        CompleteStartupValidation(decision);
     }
 
-    private bool CompleteStartupValidationAfterTimeout()
+    private StartupValidationDecision CompleteStartupValidationAfterTimeout()
     {
-        var (healthy, reason) = EvaluateStartupStreamHealth();
-        CompleteStartupValidation(healthy, reason);
-        return healthy;
+        var decision = EvaluateStartupStreamHealth();
+        CompleteStartupValidation(decision);
+        return decision;
     }
 
-    private (bool Healthy, string Reason) EvaluateStartupStreamHealth()
+    private StartupValidationDecision EvaluateStartupStreamHealth()
     {
+        var finalAttempt = _startupValidationAttempt >= StartupRetryCount;
+        var requiredCallbacks = GetRequiredStartupValidationCallbacks(ActiveBackend, _startupValidationAttempt);
+        var ignoredWarmupDeadCallbacks = GetStartupIgnoredInitialDeadCallbacks(ActiveBackend, _startupValidationAttempt);
+        var effectiveSamples = GetEffectiveStartupSamples(ignoredWarmupDeadCallbacks);
+        var effectiveCallbackCount = effectiveSamples.Count;
+        var effectiveDeadCallbackCount = effectiveSamples.Count(static sample => IsClearlyDeadChunk(sample.Rms, sample.Peak));
+        var effectiveAverageRms = effectiveCallbackCount > 0 ? effectiveSamples.Average(static sample => sample.Rms) : 0f;
+        var effectiveAveragePeak = effectiveCallbackCount > 0 ? effectiveSamples.Average(static sample => sample.Peak) : 0f;
+        var meaningfulSignalCallbacks = effectiveCallbackCount - effectiveDeadCallbackCount;
+
         if (_startupCallbackCount <= 0)
-            return (false, "no_callbacks");
+            return new StartupValidationDecision(false, "no_callbacks_yet", !finalAttempt, 0, 0, 0, 0, 0f, 0f);
 
         if (_startupBytesReceived <= 0)
-            return (false, "no_bytes_received");
+            return new StartupValidationDecision(false, "no_bytes_received", !finalAttempt, _startupCallbackCount, effectiveCallbackCount, effectiveDeadCallbackCount, ignoredWarmupDeadCallbacks, effectiveAverageRms, effectiveAveragePeak);
 
         if (_startupUnexpectedRecordingStopped)
-            return (false, "unexpected_recording_stop");
+            return new StartupValidationDecision(false, "unexpected_recording_stop", false, _startupCallbackCount, effectiveCallbackCount, effectiveDeadCallbackCount, ignoredWarmupDeadCallbacks, effectiveAverageRms, effectiveAveragePeak);
 
         if (_startupFailureException is not null)
-            return (false, "startup_exception");
+            return new StartupValidationDecision(false, "startup_exception", false, _startupCallbackCount, effectiveCallbackCount, effectiveDeadCallbackCount, ignoredWarmupDeadCallbacks, effectiveAverageRms, effectiveAveragePeak);
 
-        if (_startupDeadCallbackCount >= _startupCallbackCount)
-            return (false, "all_startup_callbacks_dead");
+        if (meaningfulSignalCallbacks > 0 && !IsClearlyDeadChunk(effectiveAverageRms, effectiveAveragePeak))
+            return new StartupValidationDecision(true, "meaningful_signal_observed", false, _startupCallbackCount, effectiveCallbackCount, effectiveDeadCallbackCount, ignoredWarmupDeadCallbacks, effectiveAverageRms, effectiveAveragePeak);
 
-        var avgRms  = _startupCallbackCount > 0 ? _startupCallbackRmsTotal / _startupCallbackCount : 0f;
-        var avgPeak = _startupCallbackCount > 0 ? _startupCallbackPeakTotal / _startupCallbackCount : 0f;
-        if (IsClearlyDeadChunk(avgRms, avgPeak))
-            return (false, "average_signal_effectively_zero");
+        if (_startupCallbackCount < requiredCallbacks)
+            return new StartupValidationDecision(false, "warming_up", !finalAttempt, _startupCallbackCount, effectiveCallbackCount, effectiveDeadCallbackCount, ignoredWarmupDeadCallbacks, effectiveAverageRms, effectiveAveragePeak);
 
-        var meaningfulSignalCallbacks = _startupCallbackCount - _startupDeadCallbackCount;
-        if (meaningfulSignalCallbacks <= 0)
-            return (false, "no_meaningful_signal_callback");
+        if (effectiveCallbackCount <= 0)
+            return new StartupValidationDecision(false, finalAttempt ? "all_callbacks_dead" : "warming_up", !finalAttempt, _startupCallbackCount, effectiveCallbackCount, effectiveDeadCallbackCount, ignoredWarmupDeadCallbacks, effectiveAverageRms, effectiveAveragePeak);
 
-        return (true, "meaningful_signal_observed");
+        if (effectiveDeadCallbackCount >= effectiveCallbackCount)
+            return new StartupValidationDecision(false, finalAttempt ? "all_callbacks_dead" : "warming_up", !finalAttempt, _startupCallbackCount, effectiveCallbackCount, effectiveDeadCallbackCount, ignoredWarmupDeadCallbacks, effectiveAverageRms, effectiveAveragePeak);
+
+        if (IsClearlyDeadChunk(effectiveAverageRms, effectiveAveragePeak))
+            return new StartupValidationDecision(false, finalAttempt ? "average_signal_effectively_zero" : "warming_up", !finalAttempt, _startupCallbackCount, effectiveCallbackCount, effectiveDeadCallbackCount, ignoredWarmupDeadCallbacks, effectiveAverageRms, effectiveAveragePeak);
+
+        return new StartupValidationDecision(false, finalAttempt ? "insufficient_meaningful_signal" : "warming_up", !finalAttempt, _startupCallbackCount, effectiveCallbackCount, effectiveDeadCallbackCount, ignoredWarmupDeadCallbacks, effectiveAverageRms, effectiveAveragePeak);
     }
 
-    private void CompleteStartupValidation(bool healthy, string reason)
+    private void CompleteStartupValidation(StartupValidationDecision decision)
     {
         var avgRms  = _startupCallbackCount > 0 ? _startupCallbackRmsTotal / _startupCallbackCount : 0f;
         var avgPeak = _startupCallbackCount > 0 ? _startupCallbackPeakTotal / _startupCallbackCount : 0f;
 
-        if (healthy)
+        if (decision.Healthy)
             ReleaseStartupValidationGate();
 
         _logger.LogInformation(
-            "[MicStartupValidationDecision] backend={Backend} healthy={Healthy} reason={Reason}",
+            "[MicStartupValidationDecision] backend={Backend} healthy={Healthy} reason={Reason} retryable={Retryable} observedCallbacks={ObservedCallbacks} effectiveCallbacks={EffectiveCallbacks} effectiveDeadCallbacks={EffectiveDeadCallbacks} ignoredInitialDeadCallbacks={IgnoredInitialDeadCallbacks} effectiveAvgRms={EffectiveAvgRms:F4} effectiveAvgPeak={EffectiveAvgPeak:F4} requiredCallbacks={RequiredCallbacks} deadRmsThreshold={DeadRmsThreshold:F4} deadPeakThreshold={DeadPeakThreshold:F4}",
             BackendName(ActiveBackend),
-            healthy,
-            reason);
+            decision.Healthy,
+            decision.Reason,
+            decision.Retryable,
+            decision.ObservedCallbacks,
+            decision.EffectiveCallbacks,
+            decision.EffectiveDeadCallbacks,
+            decision.IgnoredWarmupDeadCallbacks,
+            decision.EffectiveAverageRms,
+            decision.EffectiveAveragePeak,
+            GetRequiredStartupValidationCallbacks(ActiveBackend, _startupValidationAttempt),
+            DeadChunkRmsThreshold,
+            DeadChunkPeakThreshold);
 
         _logger.LogInformation(
             "[MicStartupValidation] backend={Backend} callbacks={Callbacks} bytes={Bytes} avgRms={AvgRms:F4} avgPeak={AvgPeak:F4} deadCallbacks={DeadCallbacks} healthy={Healthy} stoppedUnexpectedly={StoppedUnexpectedly} failure={Failure}",
@@ -1040,11 +1148,56 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
             avgRms,
             avgPeak,
             _startupDeadCallbackCount,
-            healthy,
+            decision.Healthy,
             _startupUnexpectedRecordingStopped,
             _startupFailureException?.Message ?? "(none)");
 
-        _startupValidationTcs?.TrySetResult(healthy);
+        _startupValidationTcs?.TrySetResult(decision);
+    }
+
+    private static int GetRequiredStartupValidationCallbacks(MicBackend backend, int attempt)
+        => backend == MicBackend.Wasapi
+            ? WasapiStartupValidationCallbackCount + (attempt * 2)
+            : StartupValidationCallbackCount;
+
+    private static int GetStartupIgnoredInitialDeadCallbacks(MicBackend backend, int attempt)
+        => backend == MicBackend.Wasapi
+            ? Math.Min(WasapiStartupIgnoredInitialDeadCallbacks + attempt, 4)
+            : 0;
+
+    private static TimeSpan GetStartupValidationTimeout(MicBackend backend, int attempt)
+    {
+        if (backend != MicBackend.Wasapi)
+            return StartupValidationTimeout;
+
+        return attempt switch
+        {
+            0 => WasapiStartupValidationTimeout,
+            1 => WasapiStartupRetryValidationTimeout,
+            _ => TimeSpan.FromSeconds(4.0)
+        };
+    }
+
+    private List<(float Rms, float Peak)> GetEffectiveStartupSamples(int ignoredWarmupDeadCallbacks)
+    {
+        if (_startupSignalSamples.Count == 0)
+            return [];
+
+        var effectiveSamples = new List<(float Rms, float Peak)>(_startupSignalSamples.Count);
+        var ignoredDeadCallbacks = 0;
+
+        foreach (var sample in _startupSignalSamples)
+        {
+            if (ignoredDeadCallbacks < ignoredWarmupDeadCallbacks && IsClearlyDeadChunk(sample.Rms, sample.Peak))
+            {
+                ignoredDeadCallbacks++;
+                continue;
+            }
+
+            effectiveSamples.Add(sample);
+        }
+
+        return effectiveSamples;
     }
 
     private void ReleaseStartupValidationGate()
@@ -1245,6 +1398,7 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
         _startupValidationPending = false;
         _startupValidationTcs = null;
         _startupBufferedCallbacks.Clear();
+        _startupSignalSamples.Clear();
         _startupRawHadSignal = false;
         _callbackBoundarySequence = 0;
         _startupUnexpectedRecordingStopped = false;
