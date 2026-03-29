@@ -26,6 +26,7 @@ public static class TranscriptionServiceExtensions
         services.AddSingleton<WhisperModelService>();
         services.AddSingleton<SherpaOnnxModelService>();
         services.AddSingleton<ISherpaOnnxProvisioningService, SherpaOnnxProvisioningService>();
+        services.AddSingleton<ISherpaOnnxPreflightService, SherpaOnnxPreflightService>();
 
         // Factory bridge — lets ModelResolver (in Argus.AI) create local transcription
         // backends without taking a project dependency on Argus.Transcription.

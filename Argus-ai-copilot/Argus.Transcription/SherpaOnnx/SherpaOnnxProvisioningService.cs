@@ -62,7 +62,7 @@ public sealed class SherpaOnnxProvisioningService : ISherpaOnnxProvisioningServi
         await _gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            var root = _modelService.GetProfileRoot("multilingual-streaming");
+            var root = _modelService.GetProfileRoot(SherpaOnnxModelService.DefaultModelId);
             ModelRoot = root;
             SetState(State, "root_resolved", root);
 

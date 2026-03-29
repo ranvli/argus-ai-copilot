@@ -1,7 +1,9 @@
 using Argus.AI.Configuration;
 using Argus.AI.Providers;
+using Argus.Transcription.Configuration;
 using Argus.Transcription.Whisper;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace Argus.Transcription.SherpaOnnx;
 
@@ -9,6 +11,8 @@ internal sealed class LocalTranscriptionModelFactory : ILocalTranscriptionModelF
 {
     private readonly WhisperModelService _whisperModelService;
     private readonly SherpaOnnxModelService _sherpaModelService;
+    private readonly ISherpaOnnxPreflightService _sherpaPreflight;
+    private readonly TranscriptionRuntimeSettings _runtimeSettings;
     private readonly ILoggerFactory _loggerFactory;
     private readonly Dictionary<string, ITranscriptionModel> _cache =
         new(StringComparer.OrdinalIgnoreCase);
@@ -17,10 +21,14 @@ internal sealed class LocalTranscriptionModelFactory : ILocalTranscriptionModelF
     public LocalTranscriptionModelFactory(
         WhisperModelService whisperModelService,
         SherpaOnnxModelService sherpaModelService,
+        ISherpaOnnxPreflightService sherpaPreflight,
+        IOptions<TranscriptionRuntimeSettings> runtimeSettings,
         ILoggerFactory loggerFactory)
     {
         _whisperModelService = whisperModelService;
         _sherpaModelService = sherpaModelService;
+        _sherpaPreflight = sherpaPreflight;
+        _runtimeSettings = runtimeSettings.Value;
         _loggerFactory = loggerFactory;
     }
 
@@ -45,6 +53,8 @@ internal sealed class LocalTranscriptionModelFactory : ILocalTranscriptionModelF
                 "SHERPAONNX" => new SherpaOnnxLocalTranscriptionModel(
                     profile,
                     _sherpaModelService,
+                    _sherpaPreflight,
+                    _runtimeSettings,
                     _loggerFactory.CreateLogger<SherpaOnnxLocalTranscriptionModel>()),
 
                 _ => throw new NotSupportedException($"Unsupported local transcription provider '{profile.Provider}'.")

@@ -1,4 +1,3 @@
-using Argus.Transcription.SherpaOnnx; // Importing the shared enum
 using Argus.Audio.Capture;
 using Argus.Audio.Devices;
 using Argus.Context.WindowContext;
@@ -46,6 +45,7 @@ internal sealed class SessionCoordinatorService
     private readonly AssistantReactionService _assistantReaction;
     private readonly MicAudioSettings _micSettings;
     private readonly ISherpaOnnxProvisioningService _sherpaProvisioning;
+    private readonly ISherpaOnnxPreflightService _sherpaPreflight;
 
     // All state fields are accessed only via operations serialised through _gate.
     private readonly SemaphoreSlim _gate = new(1, 1);
@@ -97,7 +97,8 @@ internal sealed class SessionCoordinatorService
         IntentDetectionService intentDetector,
         AssistantReactionService assistantReaction,
         MicAudioSettings micSettings,
-        ISherpaOnnxProvisioningService sherpaProvisioning)
+        ISherpaOnnxProvisioningService sherpaProvisioning,
+        ISherpaOnnxPreflightService sherpaPreflight)
     {
         _logger           = logger;
         _appState         = appState;
@@ -110,6 +111,7 @@ internal sealed class SessionCoordinatorService
         _assistantReaction = assistantReaction;
         _micSettings      = micSettings;
         _sherpaProvisioning = sherpaProvisioning;
+        _sherpaPreflight = sherpaPreflight;
     }
 
     // ── BackgroundService ─────────────────────────────────────────────────────
@@ -165,21 +167,23 @@ internal sealed class SessionCoordinatorService
                 throw new InvalidOperationException(
                     $"Cannot start a session while in state '{_state}'. Stop the current session first.");
 
-            if (!_sherpaProvisioning.IsReady)
+            if (!_sherpaProvisioning.IsReady || !_sherpaPreflight.IsSafeToUse)
             {
-                var reason = _sherpaProvisioning.LastError
-                    ?? $"Sherpa bootstrap is not ready. State={_sherpaProvisioning.State}. Root={_sherpaProvisioning.ModelRoot}";
+                var reason = !_sherpaProvisioning.IsReady
+                    ? _sherpaProvisioning.LastError ?? $"Provisioning Sherpa model... State={_sherpaProvisioning.State}. Root={_sherpaProvisioning.ModelRoot}"
+                    : _sherpaPreflight.LastError ?? "Sherpa model loaded but failed native preflight.";
 
                 _audioStatus = new AudioStatusSnapshot
                 {
                     TranscriptionStatus = TranscriptionPipelineStatus.Error,
                     TranscriptionConfigured = true,
                     TranscriptionProvider = "SherpaOnnx",
-                    TranscriptionModel = "multilingual-streaming",
+                    TranscriptionModel = SherpaOnnxModelService.DefaultModelId,
                     TranscriptionError = reason,
                     TranscriptionLanguageMode = "forced/es",
                     SherpaProvisioningState = _sherpaProvisioning.State,
-                    SherpaModelRoot = _sherpaProvisioning.ModelRoot
+                    SherpaModelRoot = _sherpaProvisioning.ModelRoot,
+                    SherpaNativeReadinessState = _sherpaPreflight.State
                 };
                 AudioStatusChanged?.Invoke(this, _audioStatus);
 
@@ -543,7 +547,8 @@ internal sealed class SessionCoordinatorService
             // await Task.Delay(500, CancellationToken.None).ConfigureAwait(false);
 
             _logger.LogInformation("[Pipeline.Start] Calling pipeline.StartAsync for SessionId={Id}", sessionId);
-            if (_sherpaProvisioning.State is SherpaModelProvisioningState.Provisioning or SherpaModelProvisioningState.Error)
+            if (_sherpaProvisioning.State is SherpaModelProvisioningState.Provisioning or SherpaModelProvisioningState.Error
+                || !_sherpaPreflight.IsSafeToUse)
             {
                 _audioStatus = new AudioStatusSnapshot
                 {
@@ -554,11 +559,14 @@ internal sealed class SessionCoordinatorService
                     TranscriptionStatus = TranscriptionPipelineStatus.Error,
                     TranscriptionConfigured = true,
                     TranscriptionProvider = "SherpaOnnx",
-                    TranscriptionModel = "multilingual-streaming",
-                    TranscriptionError = _sherpaProvisioning.LastError ?? "Sherpa model provisioning is not ready.",
+                    TranscriptionModel = SherpaOnnxModelService.DefaultModelId,
+                    TranscriptionError = _sherpaProvisioning.State is SherpaModelProvisioningState.Provisioning or SherpaModelProvisioningState.Error
+                        ? _sherpaProvisioning.LastError ?? "Provisioning Sherpa model..."
+                        : _sherpaPreflight.LastError ?? "Sherpa model loaded but failed native preflight.",
                     TranscriptionLanguageMode = "forced/es",
                     SherpaProvisioningState = _sherpaProvisioning.State,
-                    SherpaModelRoot = _sherpaProvisioning.ModelRoot
+                    SherpaModelRoot = _sherpaProvisioning.ModelRoot,
+                    SherpaNativeReadinessState = _sherpaPreflight.State
                 };
                 AudioStatusChanged?.Invoke(this, _audioStatus);
                 return;
@@ -579,11 +587,12 @@ internal sealed class SessionCoordinatorService
                 TranscriptionStatus = TranscriptionPipelineStatus.Error,
                 TranscriptionConfigured = true,
                 TranscriptionProvider = "SherpaOnnx",
-                TranscriptionModel = "multilingual-streaming",
+                TranscriptionModel = SherpaOnnxModelService.DefaultModelId,
                 TranscriptionError = ex.Message,
                 TranscriptionLanguageMode = "forced/es",
                 SherpaProvisioningState = _sherpaProvisioning.State,
-                SherpaModelRoot = _sherpaProvisioning.ModelRoot
+                SherpaModelRoot = _sherpaProvisioning.ModelRoot,
+                SherpaNativeReadinessState = _sherpaPreflight.State
             };
             AudioStatusChanged?.Invoke(this, _audioStatus);
             // Clean up the scope since startup failed.
@@ -783,21 +792,23 @@ internal sealed class SessionCoordinatorService
         switch (mode)
         {
             case AppMode.Listening when _state == SessionLifecycleState.Idle:
-                if (!_sherpaProvisioning.IsReady)
+                if (!_sherpaProvisioning.IsReady || !_sherpaPreflight.IsSafeToUse)
                 {
-                    var reason = _sherpaProvisioning.LastError
-                        ?? $"Sherpa bootstrap is not ready. State={_sherpaProvisioning.State}. Root={_sherpaProvisioning.ModelRoot}";
+                    var reason = !_sherpaProvisioning.IsReady
+                        ? _sherpaProvisioning.LastError ?? $"Provisioning Sherpa model... State={_sherpaProvisioning.State}. Root={_sherpaProvisioning.ModelRoot}"
+                        : _sherpaPreflight.LastError ?? "Sherpa model loaded but failed native preflight.";
 
                     _audioStatus = new AudioStatusSnapshot
                     {
                         TranscriptionStatus = TranscriptionPipelineStatus.Error,
                         TranscriptionConfigured = true,
                         TranscriptionProvider = "SherpaOnnx",
-                        TranscriptionModel = "multilingual-streaming",
+                        TranscriptionModel = SherpaOnnxModelService.DefaultModelId,
                         TranscriptionError = reason,
                         TranscriptionLanguageMode = "forced/es",
                         SherpaProvisioningState = _sherpaProvisioning.State,
-                        SherpaModelRoot = _sherpaProvisioning.ModelRoot
+                        SherpaModelRoot = _sherpaProvisioning.ModelRoot,
+                        SherpaNativeReadinessState = _sherpaPreflight.State
                     };
                     AudioStatusChanged?.Invoke(this, _audioStatus);
                     _logger.LogWarning("[SherpaBootstrapGate] blocked_start reason={Reason}", reason);

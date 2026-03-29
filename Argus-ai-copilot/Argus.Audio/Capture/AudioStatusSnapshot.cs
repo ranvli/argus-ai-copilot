@@ -71,6 +71,8 @@ public sealed class AudioStatusSnapshot
     /// <summary>Resolved root path for Sherpa model assets.</summary>
     public string SherpaModelRoot { get; init; } = string.Empty;
 
+    public SherpaNativeReadinessState SherpaNativeReadinessState { get; init; } = SherpaNativeReadinessState.NotChecked;
+
     // ── Display helpers ───────────────────────────────────────────────────────
 
     public string MicrophoneStatusDisplay => MicrophoneStatus switch
@@ -164,6 +166,16 @@ public sealed class AudioStatusSnapshot
         SherpaModelProvisioningState.Error         => "✘ Sherpa model error",
         _                                          => string.Empty
     };
+
+    public string SherpaNativeReadinessDisplay => SherpaNativeReadinessState switch
+    {
+        SherpaNativeReadinessState.NotChecked       => "Not checked",
+        SherpaNativeReadinessState.PreflightRunning => "Running native preflight…",
+        SherpaNativeReadinessState.PreflightPassed  => "Native preflight passed",
+        SherpaNativeReadinessState.PreflightFailed  => "Native preflight failed",
+        SherpaNativeReadinessState.Ready            => "Ready",
+        _                                           => string.Empty
+    };
 }
 
 /// <summary>Transcription pipeline operational state.</summary>
@@ -197,4 +209,13 @@ public enum SherpaModelProvisioningState
     Provisioning,
     Ready,
     Error
+}
+
+public enum SherpaNativeReadinessState
+{
+    NotChecked,
+    PreflightRunning,
+    PreflightPassed,
+    PreflightFailed,
+    Ready
 }

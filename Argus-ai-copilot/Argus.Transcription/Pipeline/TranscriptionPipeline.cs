@@ -95,8 +95,6 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
     private const float ChunkNormalizationMinPeak = 0.015f;
     private const float ChunkNormalizationMinRms  = 0.002f;
     private const float ChunkNormalizationMaxGain = 6.0f;
-    private const float MicLowActivityPeakThreshold = 0.018f;
-    private const float MicLowActivityRmsThreshold  = 0.002f;
     private const int LanguageLockRequiredHits = 3;
     private const int HighQueueWarningThreshold = 3;
     private const int CriticalQueueWarningThreshold = 5;
@@ -778,14 +776,16 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
         return new ChunkStageDecision(merged, lowActivity ? "single_merge_and_send" : "merge_and_send", stageDelay);
     }
 
-    private static SpeechActivityMetrics AnalyzeSpeechActivity(byte[] data)
+    private SpeechActivityMetrics AnalyzeSpeechActivity(byte[] data)
     {
         var rawRms = AudioChunkDiagnostics.ComputeRms(data);
         var rawPeak = AudioChunkDiagnostics.ComputePeak(data);
         _ = NormalizeChunkForWhisper(data, out var appliedGain, out var normalizedRms, out var normalizedPeak);
 
-        var rawSpeechLike = rawRms >= MicLowActivityRmsThreshold || rawPeak >= MicLowActivityPeakThreshold;
-        var normalizedSpeechLike = normalizedRms >= MicLowActivityRmsThreshold || normalizedPeak >= MicLowActivityPeakThreshold;
+        var rmsThreshold = _runtimeSettings.MicLowActivityRmsThreshold;
+        var peakThreshold = _runtimeSettings.MicLowActivityPeakThreshold;
+        var rawSpeechLike = rawRms >= rmsThreshold || rawPeak >= peakThreshold;
+        var normalizedSpeechLike = normalizedRms >= rmsThreshold || normalizedPeak >= peakThreshold;
 
         return new SpeechActivityMetrics(
             rawRms,

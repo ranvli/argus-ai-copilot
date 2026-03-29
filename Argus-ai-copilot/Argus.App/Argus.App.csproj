@@ -14,6 +14,8 @@
     <UseWindowsForms>true</UseWindowsForms>
     <RootNamespace>Argus.App</RootNamespace>
     <AssemblyName>Argus.App</AssemblyName>
+    <SherpaPreflightProjectPath>$(MSBuildProjectDirectory)\..\Argus.SherpaPreflight\Argus.SherpaPreflight.csproj</SherpaPreflightProjectPath>
+    <SherpaPreflightOutputDir>$(MSBuildProjectDirectory)\..\Argus.SherpaPreflight\bin\$(Configuration)\net10.0\</SherpaPreflightOutputDir>
   </PropertyGroup>
 
   <ItemGroup>
@@ -47,5 +49,37 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
   </ItemGroup>
+
+  <Target Name="CopySherpaPreflightOutputsToApp" AfterTargets="Build">
+    <MSBuild Projects="$(SherpaPreflightProjectPath)" Targets="Restore" Properties="Configuration=$(Configuration)" />
+    <MSBuild Projects="$(SherpaPreflightProjectPath)" Targets="Build" Properties="Configuration=$(Configuration)" />
+    <ItemGroup>
+      <SherpaPreflightFiles Include="$(SherpaPreflightOutputDir)Argus.SherpaPreflight.exe" />
+      <SherpaPreflightFiles Include="$(SherpaPreflightOutputDir)Argus.SherpaPreflight.dll" />
+      <SherpaPreflightFiles Include="$(SherpaPreflightOutputDir)Argus.SherpaPreflight.deps.json" />
+      <SherpaPreflightFiles Include="$(SherpaPreflightOutputDir)Argus.SherpaPreflight.runtimeconfig.json" />
+      <SherpaPreflightFiles Include="$(SherpaPreflightOutputDir)sherpa-onnx.dll" />
+    </ItemGroup>
+    <Copy
+      SourceFiles="@(SherpaPreflightFiles)"
+      DestinationFiles="@(SherpaPreflightFiles->'$(OutDir)%(Filename)%(Extension)')"
+      SkipUnchangedFiles="true" />
+  </Target>
+
+  <Target Name="CopySherpaPreflightOutputsToPublish" AfterTargets="Publish" Condition="'$(PublishDir)' != ''">
+    <MSBuild Projects="$(SherpaPreflightProjectPath)" Targets="Restore" Properties="Configuration=$(Configuration)" />
+    <MSBuild Projects="$(SherpaPreflightProjectPath)" Targets="Build" Properties="Configuration=$(Configuration)" />
+    <ItemGroup>
+      <SherpaPreflightPublishFiles Include="$(SherpaPreflightOutputDir)Argus.SherpaPreflight.exe" />
+      <SherpaPreflightPublishFiles Include="$(SherpaPreflightOutputDir)Argus.SherpaPreflight.dll" />
+      <SherpaPreflightPublishFiles Include="$(SherpaPreflightOutputDir)Argus.SherpaPreflight.deps.json" />
+      <SherpaPreflightPublishFiles Include="$(SherpaPreflightOutputDir)Argus.SherpaPreflight.runtimeconfig.json" />
+      <SherpaPreflightPublishFiles Include="$(SherpaPreflightOutputDir)sherpa-onnx.dll" />
+    </ItemGroup>
+    <Copy
+      SourceFiles="@(SherpaPreflightPublishFiles)"
+      DestinationFiles="@(SherpaPreflightPublishFiles->'$(PublishDir)%(Filename)%(Extension)')"
+      SkipUnchangedFiles="true" />
+  </Target>
 
 </Project>

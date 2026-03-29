@@ -46,4 +46,20 @@ public sealed class TranscriptionRuntimeSettings
     /// When empty, the built-in official release URL is used.
     /// </summary>
     public string SherpaModelPackageUrl { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Allows in-process Sherpa decode once the out-of-process native preflight has passed.
+    /// Useful for debugging until the final isolated decode architecture lands.
+    /// </summary>
+    public bool EnableSherpaInProcessDecodeAfterPreflight { get; set; } = true;
+
+    /// <summary>
+    /// Minimum PCM16 RMS treated as speech-like by the microphone staging policy.
+    /// </summary>
+    public float MicLowActivityRmsThreshold { get; set; } = 0.0005f;
+
+    /// <summary>
+    /// Minimum PCM16 peak treated as speech-like by the microphone staging policy.
+    /// </summary>
+    public float MicLowActivityPeakThreshold { get; set; } = 0.0020f;
 }

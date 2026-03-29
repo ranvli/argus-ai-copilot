@@ -174,6 +174,7 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
     private bool _useWasapiFastPath;
     private bool _wasapiFastPathFirstCallbackLogged;
     private bool _wasapiFastPathFirstChunkLogged;
+    private bool _wasapiFastPathFirstConversionLogged;
 
     // ── Live signal levels (updated every chunk, read by the UI) ─────────────
 
@@ -249,6 +250,7 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
         _useWasapiFastPath = false;
         _wasapiFastPathFirstCallbackLogged = false;
         _wasapiFastPathFirstChunkLogged = false;
+        _wasapiFastPathFirstConversionLogged = false;
 
         // Reset continuous WAV state for new session
         CloseContWav();
@@ -1379,9 +1381,44 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
     private int AppendWasapiFastPathPcm16Locked(byte[] buffer, int bytesRecorded)
     {
         var pcm16 = ConvertFloat32MonoToPcm16(buffer, bytesRecorded);
+
+        if (!_wasapiFastPathFirstConversionLogged)
+        {
+            _wasapiFastPathFirstConversionLogged = true;
+            LogWasapiFastPathConversion(buffer, bytesRecorded, pcm16);
+        }
+
         _pcmBuffer.Write(pcm16, 0, pcm16.Length);
         TryEmitChunk();
         return pcm16.Length;
+    }
+
+    private void LogWasapiFastPathConversion(byte[] floatBuffer, int bytesRecorded, byte[] pcm16)
+    {
+        var floatSamples = Math.Min(12, bytesRecorded / 4);
+        var pcmSamples = Math.Min(12, pcm16.Length / 2);
+        var floatPreview = new System.Text.StringBuilder();
+        var pcmPreview = new System.Text.StringBuilder();
+
+        for (var i = 0; i < floatSamples; i++)
+            floatPreview.Append($"{BitConverter.ToSingle(floatBuffer, i * 4):F6} ");
+
+        for (var i = 0; i < pcmSamples; i++)
+        {
+            var sample = (short)(pcm16[i * 2] | (pcm16[(i * 2) + 1] << 8));
+            pcmPreview.Append($"{sample} ");
+        }
+
+        var convRms = AudioChunkDiagnostics.ComputeRms(pcm16);
+        var convPeak = AudioChunkDiagnostics.ComputePeak(pcm16);
+        _logger.LogInformation(
+            "[WasapiFastPath] firstConversion bytesRecorded={BytesRecorded} pcm16Bytes={Pcm16Bytes} convRms={ConvRms:F6} convPeak={ConvPeak:F6} floatSamples=[{FloatSamples}] pcm16Samples=[{Pcm16Samples}]",
+            bytesRecorded,
+            pcm16.Length,
+            convRms,
+            convPeak,
+            floatPreview.ToString().TrimEnd(),
+            pcmPreview.ToString().TrimEnd());
     }
 
     private static bool IsWasapiDirectFloat32MonoFastPath(WaveFormat format)

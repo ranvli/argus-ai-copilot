@@ -2,6 +2,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using System.Drawing;
 using System.Windows.Forms;
+using Argus.Transcription.SherpaOnnx;
 
 namespace Argus.App.Services;
 
@@ -27,6 +28,8 @@ internal sealed class TrayService : IHostedService, ITrayService, IDisposable
     private readonly ILogger<TrayService> _logger;
     private readonly IAppStateService _appState;
     private readonly MainWindow _mainWindow;
+    private readonly ISherpaOnnxProvisioningService _sherpaProvisioning;
+    private readonly ISherpaOnnxPreflightService _sherpaPreflight;
 
     private NotifyIcon? _notifyIcon;
     private ToolStripMenuItem? _itemStartListening;
@@ -35,11 +38,15 @@ internal sealed class TrayService : IHostedService, ITrayService, IDisposable
     public TrayService(
         ILogger<TrayService> logger,
         IAppStateService appState,
-        MainWindow mainWindow)
+        MainWindow mainWindow,
+        ISherpaOnnxProvisioningService sherpaProvisioning,
+        ISherpaOnnxPreflightService sherpaPreflight)
     {
         _logger = logger;
         _appState = appState;
         _mainWindow = mainWindow;
+        _sherpaProvisioning = sherpaProvisioning;
+        _sherpaPreflight = sherpaPreflight;
     }
 
     // ── IHostedService ────────────────────────────────────────────────────────
@@ -156,8 +163,19 @@ internal sealed class TrayService : IHostedService, ITrayService, IDisposable
         });
     }
 
-    private void OnStartListeningClicked(object? sender, EventArgs e) =>
+    private void OnStartListeningClicked(object? sender, EventArgs e)
+    {
+        if (!_sherpaProvisioning.IsReady || !_sherpaPreflight.IsSafeToUse)
+        {
+            var reason = !_sherpaProvisioning.IsReady
+                ? _sherpaProvisioning.LastError ?? "Provisioning Sherpa model..."
+                : _sherpaPreflight.LastError ?? "Sherpa model loaded but failed native preflight.";
+            ShowBalloonTip("Sherpa not ready", reason);
+            return;
+        }
+
         _appState.StartListening();
+    }
 
     private void OnPauseListeningClicked(object? sender, EventArgs e) =>
         _appState.PauseListening();
@@ -180,7 +198,8 @@ internal sealed class TrayService : IHostedService, ITrayService, IDisposable
                 return;
 
             var activelyListening = _appState.IsListening && !_appState.IsPaused;
-            _itemStartListening.Enabled  = !activelyListening;
+            var sherpaReady = _sherpaProvisioning.IsReady && _sherpaPreflight.IsSafeToUse;
+            _itemStartListening.Enabled  = !activelyListening && sherpaReady;
             _itemPauseListening.Enabled  =  activelyListening;
 
             _notifyIcon.Text = activelyListening

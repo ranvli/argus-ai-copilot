@@ -8,6 +8,8 @@ namespace Argus.Transcription.SherpaOnnx;
 
 public sealed class SherpaOnnxModelService
 {
+    public const string DefaultModelId = "omnilingual-offline-ctc";
+
     private readonly IPathProvider _pathProvider;
     private readonly ILogger<SherpaOnnxModelService> _logger;
     private readonly TranscriptionRuntimeSettings _runtimeSettings;
@@ -79,7 +81,7 @@ public sealed class SherpaOnnxModelService
         {
             Name = "SherpaOnnxLocal",
             Provider = "SherpaOnnx",
-            ModelId = "multilingual-streaming",
+            ModelId = DefaultModelId,
             Enabled = true
-        }, GetProfileRoot("multilingual-streaming"));
+        }, GetProfileRoot(DefaultModelId));
 }

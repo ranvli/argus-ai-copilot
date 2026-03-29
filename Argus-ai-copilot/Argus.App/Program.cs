@@ -8,7 +8,6 @@ using Argus.Infrastructure;
 using Argus.Infrastructure.Storage;
 using Argus.Transcription;
 using Argus.Transcription.Configuration;
-using Argus.App.Diagnostics;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -113,6 +112,8 @@ internal static class Program
 
                 services.AddSingleton<SherpaModelBootstrapService>();
                 services.AddHostedService(sp => sp.GetRequiredService<SherpaModelBootstrapService>());
+                services.AddSingleton<SherpaNativePreflightHostedService>();
+                services.AddHostedService(sp => sp.GetRequiredService<SherpaNativePreflightHostedService>());
 
                 // ── Application windows ────────────────────────────────────────
                 services.AddSingleton<MainWindow>();

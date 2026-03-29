@@ -12,6 +12,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Threading;
+using Argus.Transcription.SherpaOnnx;
 
 namespace Argus.App;
 
@@ -26,6 +27,8 @@ public partial class MainWindow : Window
     private readonly IAssistantReactionPublisher _reactionPublisher;
     private readonly MicAudioSettings _micSettings;
     private readonly RawMicDiagnosticRecorder _rawMicDiagnosticRecorder;
+    private readonly ISherpaOnnxProvisioningService _sherpaProvisioning;
+    private readonly ISherpaOnnxPreflightService _sherpaPreflight;
 
     // Ticks every second to refresh the live session duration label.
     private readonly DispatcherTimer _durationTimer;
@@ -52,7 +55,9 @@ public partial class MainWindow : Window
         ISessionStatePublisher statePublisher,
         IAudioStatusPublisher audioPublisher,
         IAssistantReactionPublisher reactionPublisher,
-        MicAudioSettings micSettings)
+        MicAudioSettings micSettings,
+        ISherpaOnnxProvisioningService sherpaProvisioning,
+        ISherpaOnnxPreflightService sherpaPreflight)
     {
         _logger            = logger;
         _bootstrapper      = bootstrapper;
@@ -62,6 +67,8 @@ public partial class MainWindow : Window
         _audioPublisher    = audioPublisher;
         _reactionPublisher = reactionPublisher;
         _micSettings       = micSettings;
+        _sherpaProvisioning = sherpaProvisioning;
+        _sherpaPreflight = sherpaPreflight;
         _rawMicDiagnosticRecorder = new RawMicDiagnosticRecorder(logger);
 
         InitializeComponent();
@@ -287,7 +294,14 @@ public partial class MainWindow : Window
         {
             TranscriptionNotConfiguredBanner.Visibility = Visibility.Visible;
             TranscriptionNotConfiguredText.Text =
-                $"? SherpaOnnxLocal state: {audio.SherpaProvisioningStateDisplay}.\n{audio.TranscriptionError}\nRoot: {audio.SherpaModelRoot}";
+                $"? SherpaOnnxLocal state: {audio.SherpaProvisioningStateDisplay} / {audio.SherpaNativeReadinessDisplay}.\n{audio.TranscriptionError}\nRoot: {audio.SherpaModelRoot}";
+
+            if (audio.SherpaNativeReadinessState == SherpaNativeReadinessState.PreflightFailed &&
+                audio.TranscriptionError.Contains("helper", StringComparison.OrdinalIgnoreCase))
+            {
+                LastTranscriptionErrorText.Text = $"Sherpa preflight helper is missing. {audio.TranscriptionError}";
+                LastTranscriptionErrorText.Foreground = ErrorBrush;
+            }
         }
         else
         {
@@ -509,7 +523,8 @@ public partial class MainWindow : Window
         var isPaused    = snap.LifecycleState == Core.Domain.Enums.SessionLifecycleState.Paused;
         var isActive    = snap.IsActive;
 
-        StartSessionButton.IsEnabled  = isIdle;
+        var sherpaReady = _sherpaProvisioning.IsReady && _sherpaPreflight.IsSafeToUse;
+        StartSessionButton.IsEnabled  = isIdle && sherpaReady;
         PauseSessionButton.IsEnabled  = isListening;
         ResumeSessionButton.IsEnabled = isPaused;
         StopSessionButton.IsEnabled   = isActive;
@@ -543,6 +558,17 @@ public partial class MainWindow : Window
         StartSessionButton.IsEnabled = false;
         try
         {
+            if (!_sherpaProvisioning.IsReady || !_sherpaPreflight.IsSafeToUse)
+            {
+                var reason = !_sherpaProvisioning.IsReady
+                    ? _sherpaProvisioning.LastError ?? "Provisioning Sherpa model..."
+                    : _sherpaPreflight.LastError ?? "Sherpa model loaded but failed native preflight.";
+                LastTranscriptionErrorText.Text = reason;
+                LastTranscriptionErrorText.Foreground = ErrorBrush;
+                StartSessionButton.IsEnabled = false;
+                return;
+            }
+
             await _coordinator.StartSessionAsync(
                 $"Session {DateTimeOffset.Now:yyyy-MM-dd HH:mm}");
         }

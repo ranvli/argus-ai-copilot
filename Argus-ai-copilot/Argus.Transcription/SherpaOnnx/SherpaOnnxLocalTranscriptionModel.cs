@@ -4,6 +4,7 @@ using Argus.AI.Providers;
 using Argus.Core.Domain.Entities;
 using Argus.Core.Domain.Enums;
 using Argus.Core.Domain.ValueObjects;
+using Argus.Transcription.Configuration;
 using Microsoft.Extensions.Logging;
 using SherpaOnnx;
 using System.Diagnostics;
@@ -14,6 +15,8 @@ internal sealed class SherpaOnnxLocalTranscriptionModel : ITranscriptionModel
 {
     private readonly ProviderProfile _profile;
     private readonly SherpaOnnxModelService _modelService;
+    private readonly ISherpaOnnxPreflightService _preflight;
+    private readonly TranscriptionRuntimeSettings _runtimeSettings;
     private readonly ILogger<SherpaOnnxLocalTranscriptionModel> _logger;
     private readonly Lock _lock = new();
 
@@ -25,10 +28,14 @@ internal sealed class SherpaOnnxLocalTranscriptionModel : ITranscriptionModel
     public SherpaOnnxLocalTranscriptionModel(
         ProviderProfile profile,
         SherpaOnnxModelService modelService,
+        ISherpaOnnxPreflightService preflight,
+        TranscriptionRuntimeSettings runtimeSettings,
         ILogger<SherpaOnnxLocalTranscriptionModel> logger)
     {
         _profile = profile;
         _modelService = modelService;
+        _preflight = preflight;
+        _runtimeSettings = runtimeSettings;
         _logger = logger;
     }
 
@@ -40,6 +47,14 @@ internal sealed class SherpaOnnxLocalTranscriptionModel : ITranscriptionModel
     {
         if (request.AudioPcm16.IsEmpty)
             return Task.FromResult(TranscriptionResponse.Error("SherpaOnnxLocal requires in-memory PCM audio."));
+
+        if (!_runtimeSettings.EnableSherpaInProcessDecodeAfterPreflight)
+            return Task.FromResult(TranscriptionResponse.Error(
+                "SherpaOnnxLocal live decode is disabled by configuration. Set ArgusAI:Transcription:EnableSherpaInProcessDecodeAfterPreflight=true to allow in-process decode after preflight passes."));
+
+        if (!_preflight.IsSafeToUse)
+            return Task.FromResult(TranscriptionResponse.Error(
+                _preflight.LastError ?? "SherpaOnnxLocal live decode is blocked because native preflight has not passed."));
 
         try
         {
@@ -57,7 +72,7 @@ internal sealed class SherpaOnnxLocalTranscriptionModel : ITranscriptionModel
                 "[SherpaASRRoute] language={Language} model={Model} family={Family}",
                 language,
                 _config!.Model,
-                "omnilingual_ctc");
+                "omnilingual_offline_ctc");
 
             var segments = BuildSegments(text, timestamps, language);
             var fullText = string.Join(" ", segments.Select(s => s.Text)).Trim();

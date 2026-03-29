@@ -5,7 +5,7 @@ namespace Argus.Transcription.SherpaOnnx;
 
 internal static class SherpaOnnxConfigParser
 {
-    private const string ExpectedLayoutHint = "Place an official sherpa-onnx omnilingual model folder containing model.int8.onnx and tokens.txt under the configured SherpaModelsRoot or %LocalAppData%\\ArgusAI\\models\\sherpa-onnx\\<ModelId>.";
+    private const string ExpectedLayoutHint = "Place an official sherpa-onnx omnilingual offline CTC model folder containing model.int8.onnx and tokens.txt under the configured SherpaModelsRoot or %LocalAppData%\\ArgusAI\\models\\sherpa-onnx\\<ModelId>.";
 
     public static SherpaOnnxAssetValidationResult ValidateAssets(ProviderProfile profile, string profileRoot)
     {
@@ -44,8 +44,8 @@ internal static class SherpaOnnxConfigParser
             NumThreads: Environment.ProcessorCount,
             Debug: false,
             Tokens: tokensPath,
-            ModelType: "omnilingual_ctc",
-            ModelingUnit: "bpe",
+            ModelType: string.Empty,
+            ModelingUnit: "cjkchar",
             BpeVocab: string.Empty,
             Model: modelPath);
     }
