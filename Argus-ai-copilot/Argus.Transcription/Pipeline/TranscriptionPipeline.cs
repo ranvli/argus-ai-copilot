@@ -84,6 +84,7 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
     private string?                  _lockedLanguage;
     private string?                  _languageCandidate;
     private int                      _languageCandidateHits;
+    private int                      _languageProbeChunksObserved;
     private bool                     _disposing;
     private bool                     _stopped;
     private bool                     _disposed;
@@ -154,6 +155,7 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
         _lockedLanguage        = null;
         _languageCandidate     = null;
         _languageCandidateHits = 0;
+        _languageProbeChunksObserved = 0;
         _highQueueStreak       = 0;
         _stopped               = false;
 
@@ -876,6 +878,7 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
             string.Equals(SanitizeLanguage(segment.Language), detectedLanguage, StringComparison.Ordinal));
         var textValid = IsValidTranscription(text);
         var deadSignal = IsClearlyDeadSignal(inputRms, inputPeak);
+        var probeChunkCount = Math.Max(1, _runtimeSettings.AutoLanguageProbeChunkCount);
 
         if (detectedLanguage is null ||
             !hasReliableSegmentLanguage ||
@@ -904,6 +907,9 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
                 _lockedLanguage ?? "(none)");
             return;
         }
+
+        _languageProbeChunksObserved++;
+        var probeRemaining = Math.Max(0, probeChunkCount - _languageProbeChunksObserved);
 
         if (!string.Equals(_languageCandidate, detectedLanguage, StringComparison.Ordinal))
         {
@@ -940,7 +946,17 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
                 chunkId,
                 _lockedLanguage,
                 "candidate_confirmed");
+            _logger.LogInformation(
+                "[LanguageProbe] action=lock language={Language} reason={Reason}",
+                _lockedLanguage,
+                "probe_confirmed_candidate");
             ResetLanguageCandidate();
+        }
+        else
+        {
+            _logger.LogInformation(
+                "[LanguageProbe] action=defer reason={Reason}",
+                "candidate_not_strong_enough");
         }
 
         _logger.LogInformation(

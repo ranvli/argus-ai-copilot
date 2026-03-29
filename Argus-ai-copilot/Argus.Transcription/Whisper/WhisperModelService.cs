@@ -1,10 +1,15 @@
 using Argus.Audio.Capture;
 using Argus.Infrastructure.Storage;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+using Argus.Transcription.Configuration;
+using System.Collections.Generic;
 using WhisperFactory = Whisper.net.WhisperFactory;
 using WhisperGgmlDownloader = Whisper.net.Ggml.WhisperGgmlDownloader;
 using GgmlType = Whisper.net.Ggml.GgmlType;
 using QuantizationType = Whisper.net.Ggml.QuantizationType;
+using RuntimeLibrary = Whisper.net.LibraryLoader.RuntimeLibrary;
+using RuntimeOptions = Whisper.net.LibraryLoader.RuntimeOptions;
 
 namespace Argus.Transcription.Whisper;
 
@@ -23,9 +28,11 @@ public sealed class WhisperModelService : IAsyncDisposable
 {
     private readonly IPathProvider _pathProvider;
     private readonly ILogger<WhisperModelService> _logger;
+    private readonly TranscriptionRuntimeSettings _runtimeSettings;
     private readonly SemaphoreSlim _lock = new(1, 1);
 
     private WhisperFactory? _factory;
+    private string _activeRuntime = "cpu";
 
     public WhisperModelDownloadState DownloadState { get; private set; } =
         WhisperModelDownloadState.NotChecked;
@@ -33,11 +40,17 @@ public sealed class WhisperModelService : IAsyncDisposable
     /// <summary>Full path to the model file (populated after first EnsureModelAsync call).</summary>
     public string ModelPath { get; private set; } = string.Empty;
 
-    public WhisperModelService(IPathProvider pathProvider, ILogger<WhisperModelService> logger)
+    public WhisperModelService(
+        IPathProvider pathProvider,
+        ILogger<WhisperModelService> logger,
+        IOptions<TranscriptionRuntimeSettings> runtimeSettings)
     {
         _pathProvider = pathProvider;
         _logger       = logger;
+        _runtimeSettings = runtimeSettings.Value;
     }
+
+    public string ActiveRuntime => _activeRuntime;
 
     /// <summary>
     /// Ensures the GGML model file for <paramref name="modelId"/> (e.g. "base.en") is present
@@ -109,9 +122,9 @@ public sealed class WhisperModelService : IAsyncDisposable
             }
 
             _logger.LogInformation(
-                "[WhisperModel] Initialising WhisperFactory. ModelId={ModelId}", modelId);
+                "[WhisperModel] Initialising WhisperFactory. ModelId={ModelId} Runtime={Runtime}", modelId, _runtimeSettings.RuntimePreference);
 
-            _factory = WhisperFactory.FromPath(path);
+            _factory = CreateFactory(path, modelId);
             DownloadState = WhisperModelDownloadState.Ready;
 
             _logger.LogInformation(
@@ -169,4 +182,68 @@ public sealed class WhisperModelService : IAsyncDisposable
             modelId, fallback);
         return fallback;
     }
+
+    private WhisperFactory CreateFactory(string path, string modelId)
+    {
+        var requested = NormalizeRuntimePreference(_runtimeSettings.RuntimePreference);
+        var runtimeOrder = BuildRuntimeOrder(requested);
+
+        RuntimeOptions.RuntimeLibraryOrder = runtimeOrder.ToList();
+
+        try
+        {
+            var factory = WhisperFactory.FromPath(path);
+            _activeRuntime = DescribeRuntime(runtimeOrder[0]);
+            _logger.LogInformation(
+                "[WhisperRuntime] requested={Requested} active={Active} fallback={FallbackReason}",
+                requested,
+                _activeRuntime,
+                "(none)");
+            return factory;
+        }
+        catch (Exception ex) when (requested == "cuda")
+        {
+            _logger.LogWarning(ex,
+                "[WhisperRuntime] requested={Requested} active={Active} fallback={FallbackReason}",
+                requested,
+                "cpu",
+                "cuda_initialisation_failed");
+
+            RuntimeOptions.RuntimeLibraryOrder = [RuntimeLibrary.Cpu];
+            var factory = WhisperFactory.FromPath(path);
+            _activeRuntime = "cpu";
+            _logger.LogInformation(
+                "[WhisperModel] Initialising WhisperFactory. ModelId={ModelId} Runtime={Runtime}",
+                modelId,
+                _activeRuntime);
+            return factory;
+        }
+    }
+
+    private static string NormalizeRuntimePreference(string? runtimePreference)
+    {
+        var normalized = runtimePreference?.Trim().ToLowerInvariant();
+        return normalized switch
+        {
+            "cuda" => "cuda",
+            "cpu" => "cpu",
+            _ => "auto"
+        };
+    }
+
+    private static RuntimeLibrary[] BuildRuntimeOrder(string requested)
+        => requested switch
+        {
+            "cuda" => [RuntimeLibrary.Cuda, RuntimeLibrary.Cpu],
+            "cpu" => [RuntimeLibrary.Cpu],
+            _ => [RuntimeLibrary.Cuda, RuntimeLibrary.Cpu]
+        };
+
+    private static string DescribeRuntime(RuntimeLibrary runtime)
+        => runtime switch
+        {
+            RuntimeLibrary.Cuda => "cuda",
+            RuntimeLibrary.Cpu => "cpu",
+            _ => runtime.ToString()
+        };
 }

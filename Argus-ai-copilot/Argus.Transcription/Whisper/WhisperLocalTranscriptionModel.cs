@@ -137,12 +137,13 @@ internal sealed class WhisperLocalTranscriptionModel : ITranscriptionModel
             }
 
             _logger.LogInformation(
-                "[WhisperLocal] Transcription complete. ModelId={ModelId} Segments={Count} TextLength={Len}",
-                _profile.ModelId, segments.Count, fullText.Length);
+                "[WhisperLocal] Transcription complete. ModelId={ModelId} Runtime={Runtime} Segments={Count} TextLength={Len}",
+                _profile.ModelId, _modelService.ActiveRuntime, segments.Count, fullText.Length);
 
             _logger.LogInformation(
-                "[WhisperTiming] modelId={ModelId} requestLanguage={RequestLanguage} ensureModelMs={EnsureModelMs:F1} buildMs={BuildMs:F1} audioOpenMs={AudioOpenMs:F1} processMs={ProcessMs:F1} totalMs={TotalMs:F1} segments={Segments} detectedLanguage={DetectedLanguage}",
+                "[WhisperTiming] modelId={ModelId} runtime={Runtime} requestLanguage={RequestLanguage} ensureModelMs={EnsureModelMs:F1} buildMs={BuildMs:F1} audioOpenMs={AudioOpenMs:F1} processMs={ProcessMs:F1} totalMs={TotalMs:F1} segments={Segments} detectedLanguage={DetectedLanguage}",
                 _profile.ModelId,
+                _modelService.ActiveRuntime,
                 request.Language ?? "(auto)",
                 ensureModelMs,
                 buildMs,
