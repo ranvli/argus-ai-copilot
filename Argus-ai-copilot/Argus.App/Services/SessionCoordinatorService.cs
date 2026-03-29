@@ -165,6 +165,27 @@ internal sealed class SessionCoordinatorService
                 throw new InvalidOperationException(
                     $"Cannot start a session while in state '{_state}'. Stop the current session first.");
 
+            if (!_sherpaProvisioning.IsReady)
+            {
+                var reason = _sherpaProvisioning.LastError
+                    ?? $"Sherpa bootstrap is not ready. State={_sherpaProvisioning.State}. Root={_sherpaProvisioning.ModelRoot}";
+
+                _audioStatus = new AudioStatusSnapshot
+                {
+                    TranscriptionStatus = TranscriptionPipelineStatus.Error,
+                    TranscriptionConfigured = true,
+                    TranscriptionProvider = "SherpaOnnx",
+                    TranscriptionModel = "multilingual-streaming",
+                    TranscriptionError = reason,
+                    TranscriptionLanguageMode = "forced/es",
+                    SherpaProvisioningState = _sherpaProvisioning.State,
+                    SherpaModelRoot = _sherpaProvisioning.ModelRoot
+                };
+                AudioStatusChanged?.Invoke(this, _audioStatus);
+
+                throw new InvalidOperationException(reason);
+            }
+
             var session = new Session
             {
                 Title              = string.IsNullOrWhiteSpace(title)
@@ -762,6 +783,27 @@ internal sealed class SessionCoordinatorService
         switch (mode)
         {
             case AppMode.Listening when _state == SessionLifecycleState.Idle:
+                if (!_sherpaProvisioning.IsReady)
+                {
+                    var reason = _sherpaProvisioning.LastError
+                        ?? $"Sherpa bootstrap is not ready. State={_sherpaProvisioning.State}. Root={_sherpaProvisioning.ModelRoot}";
+
+                    _audioStatus = new AudioStatusSnapshot
+                    {
+                        TranscriptionStatus = TranscriptionPipelineStatus.Error,
+                        TranscriptionConfigured = true,
+                        TranscriptionProvider = "SherpaOnnx",
+                        TranscriptionModel = "multilingual-streaming",
+                        TranscriptionError = reason,
+                        TranscriptionLanguageMode = "forced/es",
+                        SherpaProvisioningState = _sherpaProvisioning.State,
+                        SherpaModelRoot = _sherpaProvisioning.ModelRoot
+                    };
+                    AudioStatusChanged?.Invoke(this, _audioStatus);
+                    _logger.LogWarning("[SherpaBootstrapGate] blocked_start reason={Reason}", reason);
+                    break;
+                }
+
                 _ = StartSessionAsync($"Session {DateTimeOffset.Now:yyyy-MM-dd HH:mm}");
                 break;
             case AppMode.Listening when _state == SessionLifecycleState.Paused:

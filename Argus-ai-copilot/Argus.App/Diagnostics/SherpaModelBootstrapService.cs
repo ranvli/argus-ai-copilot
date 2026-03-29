@@ -19,16 +19,23 @@ public sealed class SherpaModelBootstrapService : IHostedService
 
     public async Task StartAsync(CancellationToken cancellationToken)
     {
-        _logger.LogInformation("[SherpaBootstrap] action=start");
-        var result = await _provisioning.EnsureProvisionedAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            _logger.LogInformation("[SherpaBootstrap] action=start");
+            var result = await _provisioning.EnsureProvisionedAsync(cancellationToken).ConfigureAwait(false);
 
-        if (result.IsValid)
-        {
-            _logger.LogInformation("[SherpaBootstrap] action=ready root={Root}", result.ProfileRoot);
+            if (result.IsValid)
+            {
+                _logger.LogInformation("[SherpaBootstrap] action=ready root={Root}", result.ProfileRoot);
+            }
+            else
+            {
+                _logger.LogWarning("[SherpaBootstrap] action=not_ready reason={Reason}", result.Reason ?? "unknown");
+            }
         }
-        else
+        catch (Exception ex)
         {
-            _logger.LogWarning("[SherpaBootstrap] action=not_ready reason={Reason}", result.Reason ?? "unknown");
+            _logger.LogError(ex, "[SherpaBootstrap] action=failed_uncaught error={Error}", ex.Message);
         }
     }
 

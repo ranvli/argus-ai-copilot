@@ -29,6 +29,33 @@ public sealed class SherpaOnnxProvisioningService : ISherpaOnnxProvisioningServi
     public SherpaModelProvisioningState State { get; private set; } = SherpaModelProvisioningState.NotChecked;
     public string ModelRoot { get; private set; } = string.Empty;
     public string? LastError { get; private set; }
+    public bool IsReady => State == SherpaModelProvisioningState.Ready;
+
+    private void SetState(SherpaModelProvisioningState state, string step, string? message = null, Exception? ex = null)
+    {
+        State = state;
+
+        if (state == SherpaModelProvisioningState.Error)
+            LastError = message;
+        else if (state != SherpaModelProvisioningState.Provisioning)
+            LastError = null;
+
+        if (ex is not null)
+        {
+            _logger.LogError(ex,
+                "[SherpaBootstrap] state={State} step={Step} message={Message}",
+                state,
+                step,
+                message ?? string.Empty);
+            return;
+        }
+
+        _logger.LogInformation(
+            "[SherpaBootstrap] state={State} step={Step} message={Message}",
+            state,
+            step,
+            message ?? string.Empty);
+    }
 
     public async Task<SherpaOnnxAssetValidationResult> EnsureProvisionedAsync(CancellationToken ct = default)
     {
@@ -37,33 +64,28 @@ public sealed class SherpaOnnxProvisioningService : ISherpaOnnxProvisioningServi
         {
             var root = _modelService.GetProfileRoot("multilingual-streaming");
             ModelRoot = root;
+            SetState(State, "root_resolved", root);
 
             var validation = _modelService.ValidateDefaultAssets();
             if (validation.IsValid)
             {
-                State = SherpaModelProvisioningState.Ready;
-                LastError = null;
+                SetState(SherpaModelProvisioningState.Ready, "already_present", root);
                 return validation;
             }
 
             if (!_runtimeSettings.EnableSherpaAutoProvisioning)
             {
-                State = SherpaModelProvisioningState.Error;
-                LastError = validation.ToUserMessage();
+                SetState(SherpaModelProvisioningState.Error, "auto_provisioning_disabled", validation.ToUserMessage());
                 return validation;
             }
 
-            State = SherpaModelProvisioningState.Provisioning;
-            LastError = null;
+            SetState(SherpaModelProvisioningState.Provisioning, "download_prepare", root);
 
             var packageUrl = string.IsNullOrWhiteSpace(_runtimeSettings.SherpaModelPackageUrl)
                 ? DefaultOmnilingualPackageUrl
                 : _runtimeSettings.SherpaModelPackageUrl.Trim();
 
-            _logger.LogInformation(
-                "[SherpaProvisioning] action=download url={Url} root={Root}",
-                packageUrl,
-                root);
+            SetState(SherpaModelProvisioningState.Provisioning, "download_start", packageUrl);
 
             var tempDir = Path.Combine(Path.GetTempPath(), "argus-sherpa-bootstrap", Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(tempDir);
@@ -79,8 +101,13 @@ public sealed class SherpaOnnxProvisioningService : ISherpaOnnxProvisioningServi
                     await response.Content.CopyToAsync(fs, ct).ConfigureAwait(false);
                 }
 
+                SetState(SherpaModelProvisioningState.Provisioning, "download_complete", archivePath);
+                SetState(SherpaModelProvisioningState.Provisioning, "extract_start", archivePath);
                 await ExtractTarBz2Async(archivePath, tempDir, ct).ConfigureAwait(false);
+                SetState(SherpaModelProvisioningState.Provisioning, "extract_complete", tempDir);
+                SetState(SherpaModelProvisioningState.Provisioning, "copy_start", root);
                 CopyProvisionedFiles(tempDir, root);
+                SetState(SherpaModelProvisioningState.Provisioning, "copy_complete", root);
             }
             finally
             {
@@ -90,21 +117,16 @@ public sealed class SherpaOnnxProvisioningService : ISherpaOnnxProvisioningServi
             validation = _modelService.ValidateDefaultAssets();
             if (!validation.IsValid)
             {
-                State = SherpaModelProvisioningState.Error;
-                LastError = validation.ToUserMessage();
+                SetState(SherpaModelProvisioningState.Error, "verify_failed", validation.ToUserMessage());
                 return validation;
             }
 
-            State = SherpaModelProvisioningState.Ready;
-            LastError = null;
-            _logger.LogInformation("[SherpaProvisioning] action=ready root={Root}", root);
+            SetState(SherpaModelProvisioningState.Ready, "ready", root);
             return validation;
         }
         catch (Exception ex)
         {
-            State = SherpaModelProvisioningState.Error;
-            LastError = ex.Message;
-            _logger.LogError(ex, "[SherpaProvisioning] action=failed error={Error}", ex.Message);
+            SetState(SherpaModelProvisioningState.Error, "exception", ex.Message, ex);
             return _modelService.ValidateDefaultAssets();
         }
         finally
