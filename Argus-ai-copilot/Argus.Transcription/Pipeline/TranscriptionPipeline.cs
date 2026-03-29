@@ -89,6 +89,7 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
     private bool                     _stopped;
     private bool                     _disposed;
     private int                      _highQueueStreak;
+    private DateTimeOffset           _lastProviderBottleneckLogAt = DateTimeOffset.MinValue;
 
     private const float ChunkNormalizationTargetPeak = 0.45f;
     private const float ChunkNormalizationMinPeak = 0.015f;
@@ -523,6 +524,13 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
                 languageMode,
                 requestLanguage ?? "(none)");
 
+            if (languageMode == "forced")
+            {
+                _logger.LogInformation(
+                    "[TxLanguageMode] note={Note}",
+                    "spanish_success_currently_depends_on_forced_language_override_not_auto_detection");
+            }
+
             var request = new TranscriptionRequest
             {
                 AudioFilePath  = tempFile,
@@ -534,6 +542,7 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
             var response = await _transcriptionModel.TranscribeAsync(request, ct);
             providerStopwatch.Stop();
             providerMs = providerStopwatch.Elapsed.TotalMilliseconds;
+            LogProviderBottleneck(chunk, languageMode, providerMs, whisperDuration, queueBefore);
 
             if (response.IsError)
             {
@@ -594,7 +603,21 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
             }
             else
             {
-                UpdateLanguageLock(detectedLanguage, effectiveText, validSegments, inputRms, inputPeak, chunk.Id);
+                if (_runtimeSettings.EnableAutoLanguageProbe)
+                {
+                    UpdateLanguageLock(detectedLanguage, effectiveText, validSegments, inputRms, inputPeak, chunk.Id);
+                }
+                else
+                {
+                    ResetLanguageCandidate();
+                    _logger.LogInformation(
+                        "[LanguageProbe] action=defer reason={Reason}",
+                        "auto_probe_disabled_by_config");
+                    _logger.LogInformation(
+                        "[LanguageLock] detected={Detected} locked={Locked}",
+                        detectedLanguage ?? "(none)",
+                        _lockedLanguage ?? "(none)");
+                }
             }
 
             _logger.LogInformation(
@@ -999,6 +1022,34 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
         return (null, "auto");
     }
 
+    private void LogProviderBottleneck(
+        AudioChunk chunk,
+        string languageMode,
+        double providerMs,
+        TimeSpan whisperDuration,
+        int queueBefore)
+    {
+        if (providerMs < 5_000)
+            return;
+
+        var now = DateTimeOffset.UtcNow;
+        if ((now - _lastProviderBottleneckLogAt).TotalSeconds < 15)
+            return;
+
+        _lastProviderBottleneckLogAt = now;
+
+        _logger.LogInformation(
+            "[Pipeline.BottleneckDiagnosis] dominant=provider_inference chunkId={ChunkId} providerMs={ProviderMs:F1} audioDurationMs={AudioDurationMs:F1} queueBefore={QueueBefore} languageMode={LanguageMode} provider={Provider} modelId={ModelId} note={Note}",
+            chunk.Id,
+            providerMs,
+            whisperDuration.TotalMilliseconds,
+            queueBefore,
+            languageMode,
+            _transcriptionProvider,
+            _transcriptionModelId,
+            "current_architecture_is_sequential_offline_per_chunk_stt_so_real_time_is_not_achievable_while_provider_inference_exceeds_chunk_duration");
+    }
+
     private void ObserveBacklog(int queueBefore)
     {
         if (queueBefore >= HighQueueWarningThreshold)
@@ -1048,6 +1099,18 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
             result);
     }
 
+    private string GetTranscriptionLanguageModeDisplay()
+    {
+        var forcedLanguage = SanitizeLanguage(_runtimeSettings.ForcedLanguage);
+        if (forcedLanguage is not null)
+            return $"forced/{forcedLanguage}";
+
+        if (_lockedLanguage is not null)
+            return $"locked/{_lockedLanguage}";
+
+        return _runtimeSettings.EnableAutoLanguageProbe ? "auto/probe-ready" : "auto/disabled";
+    }
+
     private List<TranscriptSegment> StampSegments(IReadOnlyList<TranscriptSegment> raw, AudioChunk chunk)
     {
         var result = new List<TranscriptSegment>(raw.Count);
@@ -1095,6 +1158,7 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
             TranscriptionConfigured = _transcriptionModel is not null,
             TranscriptionProvider   = _transcriptionProvider,
             TranscriptionModel      = _transcriptionModelId,
+            TranscriptionLanguageMode = GetTranscriptionLanguageModeDisplay(),
             LastTranscriptionAt     = _lastTranscriptionAt,
             WhisperDownloadState    = whisperState,
             WhisperModelPath        = _whisperModelService?.ModelPath ?? string.Empty

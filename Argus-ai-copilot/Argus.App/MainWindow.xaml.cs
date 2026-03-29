@@ -234,7 +234,7 @@ public partial class MainWindow : Window
 
         // Provider / model
         TranscriptionProviderText.Text = audio.TranscriptionConfigured
-            ? audio.TranscriptionProviderDisplay
+            ? $"{audio.TranscriptionProviderDisplay}  [{audio.TranscriptionLanguageModeDisplay}]"
             : "? Not configured";
 
         // Whisper model download state (only shown for WhisperNet provider)

@@ -53,6 +53,9 @@ public sealed class AudioStatusSnapshot
     /// <summary>Model ID used for transcription, e.g. "base.en".</summary>
     public string TranscriptionModel { get; init; } = string.Empty;
 
+    /// <summary>Human-readable transcription language mode, e.g. forced/es, locked/en, or auto.</summary>
+    public string TranscriptionLanguageMode { get; init; } = string.Empty;
+
     /// <summary>UTC timestamp of the last successfully transcribed chunk.</summary>
     public DateTimeOffset? LastTranscriptionAt { get; init; }
 
@@ -130,6 +133,11 @@ public sealed class AudioStatusSnapshot
         TranscriptionConfigured
             ? $"{TranscriptionProvider} / {TranscriptionModel}"
             : "Not configured";
+
+    public string TranscriptionLanguageModeDisplay =>
+        string.IsNullOrWhiteSpace(TranscriptionLanguageMode)
+            ? "auto"
+            : TranscriptionLanguageMode;
 
     public string WhisperDownloadStateDisplay => WhisperDownloadState switch
     {

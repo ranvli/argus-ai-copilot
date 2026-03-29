@@ -19,4 +19,10 @@ public sealed class TranscriptionRuntimeSettings
     /// Number of meaningful chunks to probe before automatic language lock can stabilize.
     /// </summary>
     public int AutoLanguageProbeChunkCount { get; set; } = 3;
+
+    /// <summary>
+    /// Enables the automatic language probe/stabilization path when forced language is not active.
+    /// Disabled by default while forced-language diagnosis is in use.
+    /// </summary>
+    public bool EnableAutoLanguageProbe { get; set; } = false;
 }
