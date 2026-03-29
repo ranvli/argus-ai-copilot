@@ -220,14 +220,14 @@ public sealed class AssistantReactionService : IAssistantReactionPublisher, IAsy
 
         DetectedIntent.QuestionForAssistant =>
             "You are Argus, a real-time desktop assistant. " +
-            "The user asked a natural spoken question about their current situation. " +
-            "Answer briefly, practically, and in the same language as the conversation. " +
-            "Use the current app/window context when relevant.",
+            "The user asked a spoken question in the provided transcript. " +
+            "Answer briefly, practically, and only from the provided transcript text. " +
+            "If the transcript is unclear, say briefly that you are not sure.",
 
         _ =>
             "You are Argus, a helpful real-time AI assistant. " +
-            "The user has addressed you during a live conversation. " +
-            "Give a brief, helpful response in the same language they used. " +
+            "The user has addressed you in the provided transcript. " +
+            "Give a brief, helpful response using only that transcript context. " +
             "Keep it to 1-3 sentences."
     };
 
@@ -248,7 +248,7 @@ public sealed class AssistantReactionService : IAssistantReactionPublisher, IAsy
                 $"Recent conversation:\n\"{context}\"\n\nWhat is being discussed here?",
 
             DetectedIntent.QuestionForAssistant =>
-                $"Recent conversation and app context:\n\"{context}\"\n\nAnswer the user's question directly and briefly.",
+                $"Recent conversation:\n\"{context}\"\n\nAnswer the user's question directly and briefly. Do not assume facts not present in the transcript.",
 
             _ =>
                 $"Recent conversation:\n\"{context}\"\n\nHow can you help me right now?"

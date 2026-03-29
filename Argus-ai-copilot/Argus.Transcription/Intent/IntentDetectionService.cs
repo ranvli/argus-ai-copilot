@@ -109,12 +109,6 @@ public sealed class IntentDetectionService
     private static readonly Regex SentencePattern =
         new(@"[^.!?\r\n]+(?:[.!?]|$)", RegexOptions.Compiled);
 
-    private static readonly Regex EnglishQuestionPattern =
-        new(@"\b(what|why|how|when|where|who)\s+(should|do|did|can|could|would|is|are|am|will|to|i|we|you)\b", RegexOptions.Compiled);
-
-    private static readonly Regex SpanishQuestionPattern =
-        new(@"\b(que|como|cuando|donde|cual|por que)\s+(debo|deberia|puedo|hago|haria|digo|respondo|le|me|pasa|significa|seria|responder|decir)\b", RegexOptions.Compiled);
-
     public IntentDetectionService(ILogger<IntentDetectionService> logger)
     {
         _logger = logger;
@@ -256,14 +250,6 @@ public sealed class IntentDetectionService
 
     private static QuestionMatch? FindQuestionPhrase(string originalText, string normalised, string folded)
     {
-        var punctuatedSentence = FindMatchingSentence(
-            originalText,
-            static sentence => (sentence.Contains('?') || sentence.Contains('¿')) &&
-                               !IsTooShortOrNoisy(FoldText(Normalise(sentence))));
-
-        if (punctuatedSentence is not null)
-            return new QuestionMatch("question_punctuation", punctuatedSentence);
-
         foreach (var phrase in QuestionPhrases)
         {
             var foldedPhrase = FoldText(Normalise(phrase));
@@ -276,26 +262,6 @@ public sealed class IntentDetectionService
 
                 return new QuestionMatch(phrase, triggerText);
             }
-        }
-
-        if (EnglishQuestionPattern.IsMatch(folded))
-        {
-            var triggerText = FindMatchingSentence(
-                originalText,
-                sentence => EnglishQuestionPattern.IsMatch(FoldText(Normalise(sentence))))
-                ?? CollapseWhitespace(originalText);
-
-            return new QuestionMatch("english_interrogative_pattern", triggerText);
-        }
-
-        if (SpanishQuestionPattern.IsMatch(folded))
-        {
-            var triggerText = FindMatchingSentence(
-                originalText,
-                sentence => SpanishQuestionPattern.IsMatch(FoldText(Normalise(sentence))))
-                ?? CollapseWhitespace(originalText);
-
-            return new QuestionMatch("spanish_interrogative_pattern", triggerText);
         }
 
         return null;

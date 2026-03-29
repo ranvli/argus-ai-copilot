@@ -90,7 +90,7 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
     private const float ChunkNormalizationMaxGain = 6.0f;
     private const float MicLowActivityPeakThreshold = 0.018f;
     private const float MicLowActivityRmsThreshold  = 0.002f;
-    private const int LanguageLockRequiredHits = 2;
+    private const int LanguageLockRequiredHits = 3;
     private static readonly TimeSpan MaxMergedMicDuration = TimeSpan.FromSeconds(5);
 
     // â”€â”€ ITranscriptionPipeline â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -517,7 +517,24 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
                 ? response.FullText.Trim()
                 : string.Join(" ", validSegments.Select(segment => segment.Text.Trim()));
 
-            UpdateLanguageLock(detectedLanguage, effectiveText, inputRms, inputPeak);
+            var deadMicSignal = chunk.Source == AudioSource.Microphone
+                && IsClearlyDeadSignal(inputRms, inputPeak)
+                && IsClearlyDeadSignal(outputRms, outputPeak);
+
+            if (deadMicSignal)
+            {
+                ResetLanguageCandidate();
+                _logger.LogDebug(
+                    "[Pipeline.TxResponse] Dropping microphone transcription from dead-signal chunk. ChunkId={Id} Preview={Preview}",
+                    chunk.Id,
+                    response.FullText.Length > 100
+                        ? response.FullText[..100] + "â€¦"
+                        : response.FullText);
+                PublishStatus(transcriptionStatus: TranscriptionPipelineStatus.Idle);
+                return;
+            }
+
+            UpdateLanguageLock(detectedLanguage, effectiveText, validSegments, inputRms, inputPeak);
 
             _logger.LogInformation(
                 "[Pipeline.TxResponse] Transcription complete. ChunkId={Id} Segments={SegCount} " +
@@ -769,7 +786,12 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
         return true;
     }
 
-    private void UpdateLanguageLock(string? detectedLanguage, string? text, float inputRms, float inputPeak)
+    private void UpdateLanguageLock(
+        string? detectedLanguage,
+        string? text,
+        IReadOnlyList<TranscriptSegment> validSegments,
+        float inputRms,
+        float inputPeak)
     {
         if (_lockedLanguage is not null)
         {
@@ -780,7 +802,13 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
             return;
         }
 
-        if (detectedLanguage is null || !IsValidTranscription(text) || IsClearlyDeadSignal(inputRms, inputPeak))
+        var hasReliableSegmentLanguage = validSegments.Any(segment =>
+            string.Equals(SanitizeLanguage(segment.Language), detectedLanguage, StringComparison.Ordinal));
+
+        if (detectedLanguage is null ||
+            !hasReliableSegmentLanguage ||
+            !IsValidTranscription(text) ||
+            IsClearlyDeadSignal(inputRms, inputPeak))
         {
             ResetLanguageCandidate();
             _logger.LogInformation(

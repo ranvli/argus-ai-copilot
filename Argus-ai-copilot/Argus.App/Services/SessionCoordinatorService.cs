@@ -611,14 +611,7 @@ internal sealed class SessionCoordinatorService
         var intent     = _intentDetector.Detect(meaningfulSegments);
         if (intent.HasIntent)
         {
-            var enrichedContext = recentText;
-            if (!string.IsNullOrWhiteSpace(_activeProcessName) || !string.IsNullOrWhiteSpace(_activeWindowTitle))
-            {
-                enrichedContext +=
-                    $"\n\nActive app: {_activeProcessName}\nActive window: {_activeWindowTitle}";
-            }
-
-            _assistantReaction.OnIntentDetected(intent, enrichedContext);
+            _assistantReaction.OnIntentDetected(intent, recentText);
         }
 
         // Persist each segment and publish to UI via snapshot update
