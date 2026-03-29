@@ -10,14 +10,19 @@ public sealed class MicAudioSettings
 {
     /// <summary>
     /// Which backend to use for microphone capture.
-    /// Default is <see cref="MicBackend.Wasapi"/> — the preferred production
-    /// microphone path.
+    /// Default is <see cref="MicBackend.Auto"/> so startup probing can prefer the
+    /// healthier backend when WASAPI is near-silent for a device.
     /// </summary>
-    public MicBackend Backend { get; set; } = MicBackend.Wasapi;
+    public MicBackend Backend { get; set; } = MicBackend.Auto;
 
     /// <summary>
     /// WaveIn device index (0 = Windows default microphone).
     /// Only used when <see cref="Backend"/> is <see cref="MicBackend.WaveIn"/>.
     /// </summary>
     public int WaveInDeviceNumber { get; set; } = 0;
+
+    /// <summary>
+    /// Chunk duration applied to microphone capture at session start.
+    /// </summary>
+    public TimeSpan ChunkDuration { get; set; } = TimeSpan.FromMilliseconds(900);
 }

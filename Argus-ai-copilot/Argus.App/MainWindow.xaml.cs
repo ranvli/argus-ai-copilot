@@ -244,6 +244,17 @@ public partial class MainWindow : Window
             ? $"{audio.TranscriptionProviderDisplay}  [{audio.TranscriptionLanguageModeDisplay}]"
             : "? Not configured";
 
+        if (audio.TranscriptionConfigured &&
+            string.Equals(audio.TranscriptionProvider, "SherpaOnnx", StringComparison.OrdinalIgnoreCase) &&
+            audio.ActiveMicBackend == MicBackend.Wasapi &&
+            audio.MicrophoneStatus == AudioCaptureStatus.Capturing &&
+            audio.MicNativeRms < 0.0008f)
+        {
+            TranscriptionNotConfiguredBanner.Visibility = Visibility.Visible;
+            TranscriptionNotConfiguredText.Text =
+                $"? Sherpa backend is alive, but WASAPI microphone signal is near-silent for this device. Active backend={audio.ActiveMicBackend}. NativeRms={audio.MicNativeRms:F4}. Recommendation: switch microphone backend to Auto or WaveIn.";
+        }
+
         // Whisper model download state (only shown for WhisperNet provider)
         var isWhisperNet = audio.WhisperDownloadState != WhisperModelDownloadState.NotApplicable;
         WhisperDownloadStatePanel.Visibility = isWhisperNet ? Visibility.Visible : Visibility.Collapsed;

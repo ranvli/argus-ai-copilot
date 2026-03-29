@@ -62,4 +62,24 @@ public sealed class TranscriptionRuntimeSettings
     /// Minimum PCM16 peak treated as speech-like by the microphone staging policy.
     /// </summary>
     public float MicLowActivityPeakThreshold { get; set; } = 0.0020f;
+
+    /// <summary>
+    /// Low-latency microphone chunk duration used for Sherpa speech transcription.
+    /// </summary>
+    public int SherpaChunkDurationMs { get; set; } = 900;
+
+    /// <summary>
+    /// When true, Sherpa microphone chunks are sent immediately unless the signal is clearly dead.
+    /// </summary>
+    public bool EnableSherpaLowLatencyMode { get; set; } = true;
+
+    /// <summary>
+    /// Active Sherpa model family. Supported values: omnilingual_offline_ctc, wenet_ctc, zipformer_ctc, sense_voice.
+    /// </summary>
+    public string SherpaModelFamily { get; set; } = "omnilingual_offline_ctc";
+
+    /// <summary>
+    /// File name of the primary Sherpa model under the profile root.
+    /// </summary>
+    public string SherpaModelFileName { get; set; } = "model.int8.onnx";
 }

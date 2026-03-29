@@ -1,6 +1,7 @@
 namespace Argus.Transcription.SherpaOnnx;
 
 internal sealed record SherpaOnnxBackendConfig(
+    string Family,
     string Provider,
     int NumThreads,
     bool Debug,

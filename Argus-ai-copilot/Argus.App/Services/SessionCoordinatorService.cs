@@ -8,6 +8,7 @@ using Argus.Core.Domain.Enums;
 using Argus.Infrastructure.Storage;
 using Argus.Transcription.Intent;
 using Argus.Transcription.Pipeline;
+using Argus.Transcription.Configuration;
 using Argus.Transcription.SherpaOnnx;
 using Argus.Transcription.Text;
 using Microsoft.Extensions.DependencyInjection;
@@ -46,6 +47,7 @@ internal sealed class SessionCoordinatorService
     private readonly MicAudioSettings _micSettings;
     private readonly ISherpaOnnxProvisioningService _sherpaProvisioning;
     private readonly ISherpaOnnxPreflightService _sherpaPreflight;
+    private readonly TranscriptionRuntimeSettings _runtimeSettings;
 
     // All state fields are accessed only via operations serialised through _gate.
     private readonly SemaphoreSlim _gate = new(1, 1);
@@ -98,7 +100,8 @@ internal sealed class SessionCoordinatorService
         AssistantReactionService assistantReaction,
         MicAudioSettings micSettings,
         ISherpaOnnxProvisioningService sherpaProvisioning,
-        ISherpaOnnxPreflightService sherpaPreflight)
+        ISherpaOnnxPreflightService sherpaPreflight,
+        Microsoft.Extensions.Options.IOptions<TranscriptionRuntimeSettings> runtimeSettings)
     {
         _logger           = logger;
         _appState         = appState;
@@ -112,6 +115,7 @@ internal sealed class SessionCoordinatorService
         _micSettings      = micSettings;
         _sherpaProvisioning = sherpaProvisioning;
         _sherpaPreflight = sherpaPreflight;
+        _runtimeSettings = runtimeSettings.Value;
     }
 
     // ── BackgroundService ─────────────────────────────────────────────────────
@@ -496,11 +500,12 @@ internal sealed class SessionCoordinatorService
             micSource.SelectedBackend    = _micSettings.Backend;
             micSource.WaveInDeviceNumber = _micSettings.WaveInDeviceNumber;
             micSource.WasapiContCapture  = _micSettings.Backend is MicBackend.Wasapi or MicBackend.Auto;
+            micSource.SetChunkDuration(TimeSpan.FromMilliseconds(_runtimeSettings.SherpaChunkDurationMs));
 
             _logger.LogInformation(
                 "[Pipeline.Start] MicrophoneCaptureSource configured: '{Device}' " +
-                "RequestedBackend={Requested} WaveInDevice={WaveInDevice}",
-                micDevice.Name, _micSettings.Backend, _micSettings.WaveInDeviceNumber);
+                "RequestedBackend={Requested} WaveInDevice={WaveInDevice} ChunkMs={ChunkMs}",
+                micDevice.Name, _micSettings.Backend, _micSettings.WaveInDeviceNumber, _runtimeSettings.SherpaChunkDurationMs);
 
             SystemAudioCaptureSource? sysSource = null;
             if (outputDevice is not null)

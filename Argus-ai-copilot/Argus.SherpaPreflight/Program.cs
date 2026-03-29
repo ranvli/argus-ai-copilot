@@ -1,14 +1,15 @@
 using SherpaOnnx;
 using System.Text.Json;
 
-if (args.Length < 2)
+if (args.Length < 3)
 {
-    Console.WriteLine(JsonSerializer.Serialize(new { ok = false, error = "usage: <model.int8.onnx> <tokens.txt>" }));
+    Console.WriteLine(JsonSerializer.Serialize(new { ok = false, error = "usage: <model.onnx> <tokens.txt> <family>" }));
     return 2;
 }
 
 var modelPath = args[0];
 var tokensPath = args[1];
+var family = args[2];
 
 if (!File.Exists(modelPath) || !File.Exists(tokensPath))
 {
@@ -24,6 +25,36 @@ if (!File.Exists(modelPath) || !File.Exists(tokensPath))
 
 try
 {
+    var modelConfig = new OfflineModelConfig
+    {
+        NumThreads = 1,
+        Debug = 0,
+        Provider = "cpu",
+        Tokens = tokensPath,
+        ModelType = "",
+        ModelingUnit = family.Equals("omnilingual_offline_ctc", StringComparison.OrdinalIgnoreCase) ? "cjkchar" : string.Empty,
+        BpeVocab = string.Empty
+    };
+
+    switch (family.Trim().ToLowerInvariant())
+    {
+        case "omnilingual_offline_ctc":
+            modelConfig.Omnilingual = new OfflineOmnilingualAsrCtcModelConfig { Model = modelPath };
+            break;
+        case "wenet_ctc":
+            modelConfig.WenetCtc = new OfflineWenetCtcModelConfig { Model = modelPath };
+            break;
+        case "zipformer_ctc":
+            modelConfig.ZipformerCtc = new OfflineZipformerCtcModelConfig { Model = modelPath };
+            break;
+        case "sense_voice":
+            modelConfig.SenseVoice = new OfflineSenseVoiceModelConfig { Model = modelPath, Language = "auto", UseInverseTextNormalization = 0 };
+            break;
+        default:
+            Console.WriteLine(JsonSerializer.Serialize(new { ok = false, error = $"unsupported_family:{family}" }));
+            return 4;
+    }
+
     var config = new OfflineRecognizerConfig
     {
         FeatConfig = new FeatureConfig
@@ -31,20 +62,7 @@ try
             SampleRate = 16_000,
             FeatureDim = 80
         },
-        ModelConfig = new OfflineModelConfig
-        {
-            NumThreads = 1,
-            Debug = 0,
-            Provider = "cpu",
-            Tokens = tokensPath,
-            ModelType = "",
-            ModelingUnit = "cjkchar",
-            BpeVocab = string.Empty,
-            Omnilingual = new OfflineOmnilingualAsrCtcModelConfig
-            {
-                Model = modelPath
-            }
-        },
+        ModelConfig = modelConfig,
         DecodingMethod = "greedy_search",
         MaxActivePaths = 4,
         BlankPenalty = 0f
@@ -64,7 +82,7 @@ try
         model = modelPath,
         tokens = tokensPath,
         recognizer = "OfflineRecognizer",
-        family = "omnilingual_offline_ctc"
+        family
     }));
 
     return 0;

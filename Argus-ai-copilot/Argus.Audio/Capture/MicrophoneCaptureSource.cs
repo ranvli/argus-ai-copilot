@@ -82,8 +82,8 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
     private bool           _firstSamplesLogged;
     private bool           _firstChunkLogged;
 
-    private readonly TimeSpan _chunkDuration;
-    private readonly int      _chunkBytes;
+    private TimeSpan _chunkDuration;
+    private int      _chunkBytes;
 
     // ── Backend selection ─────────────────────────────────────────────────────
 
@@ -319,6 +319,16 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
         }
 
         await StartWithStartupValidationAsync(resolvedBackend, sessionId, ct);
+    }
+
+    public void SetChunkDuration(TimeSpan chunkDuration)
+    {
+        _chunkDuration = chunkDuration;
+        _chunkBytes = Math.Max(1,
+            (int)Math.Round(TargetSampleRate
+                           * TargetChannels
+                           * (TargetBitsPerSample / 8)
+                           * chunkDuration.TotalSeconds));
     }
 
     private Task StartWaveInAsync(Guid sessionId)

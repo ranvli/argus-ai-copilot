@@ -324,10 +324,14 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
 
             if (model.ProviderId.Equals("SherpaOnnx", StringComparison.OrdinalIgnoreCase))
             {
+            var sherpaFamily = _runtimeSettings.SherpaModelFamily;
                 _logger.LogInformation(
-                    "[Pipeline.Provider] SherpaOnnxLocal is active. Provider={Provider} ModelId={ModelId}",
+                "[Pipeline.Provider] SherpaOnnxLocal is active. Provider={Provider} ModelId={ModelId} Family={Family} ChunkMs={ChunkMs} LowLatencyMode={LowLatencyMode}",
                     model.ProviderId,
-                    model.ModelId);
+                model.ModelId,
+                sherpaFamily,
+                _runtimeSettings.SherpaChunkDurationMs,
+                _runtimeSettings.EnableSherpaLowLatencyMode);
             }
         }
         catch (InvalidOperationException ex)
@@ -741,6 +745,13 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
         var metrics = AnalyzeSpeechActivity(chunk.Data);
         var lowActivity = metrics.IsLowActivity;
 
+        if (IsSherpaLowLatencyMode() && !IsClearlyDeadSignal(metrics.RawRms, metrics.RawPeak))
+        {
+            _pendingMicChunk = null;
+            LogLatencyPolicy("sherpa_send_immediately", chunk.Duration, metrics);
+            return new ChunkStageDecision(chunk, "sherpa_send_immediately", TimeSpan.Zero);
+        }
+
         if (_pendingMicChunk is null)
         {
             if (!lowActivity)
@@ -1013,6 +1024,10 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
     private static bool IsClearlyDeadSignal(float rms, float peak)
         => peak < 0.0015f && rms < 0.0008f;
 
+    private bool IsSherpaLowLatencyMode()
+        => _runtimeSettings.EnableSherpaLowLatencyMode
+           && _transcriptionProvider.Equals("SherpaOnnx", StringComparison.OrdinalIgnoreCase);
+
     private readonly record struct SpeechActivityMetrics(
         float RawRms,
         float RawPeak,
@@ -1029,6 +1044,14 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
     private (string? Language, string Mode) ResolveRequestLanguage()
     {
         var forcedLanguage = SanitizeLanguage(_runtimeSettings.ForcedLanguage);
+        if (_transcriptionProvider.Equals("SherpaOnnx", StringComparison.OrdinalIgnoreCase))
+        {
+            if (forcedLanguage is not null)
+                return (forcedLanguage, "requested-not-enforced");
+
+            return (null, "unknown");
+        }
+
         if (forcedLanguage is not null)
             return (forcedLanguage, "forced");
 
@@ -1118,6 +1141,14 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
     private string GetTranscriptionLanguageModeDisplay()
     {
         var forcedLanguage = SanitizeLanguage(_runtimeSettings.ForcedLanguage);
+        if (_transcriptionProvider.Equals("SherpaOnnx", StringComparison.OrdinalIgnoreCase))
+        {
+            if (forcedLanguage is not null)
+                return $"requested/{forcedLanguage} actual/unknown";
+
+            return "actual/unknown";
+        }
+
         if (forcedLanguage is not null)
             return $"forced/{forcedLanguage}";
 

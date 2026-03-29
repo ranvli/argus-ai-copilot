@@ -53,7 +53,7 @@ public sealed class SherpaOnnxModelService
     public SherpaOnnxAssetValidationResult ValidateAssets(ProviderProfile profile)
     {
         var root = GetProfileRoot(profile.ModelId);
-        var result = SherpaOnnxConfigParser.ValidateAssets(profile, root);
+        var result = SherpaOnnxConfigParser.ValidateAssets(profile, root, _runtimeSettings.SherpaModelFileName);
 
         _logger.LogInformation(
             "[SherpaAssets] root={Root} modelExists={ModelExists} tokensExists={TokensExists}",
@@ -83,5 +83,14 @@ public sealed class SherpaOnnxModelService
             Provider = "SherpaOnnx",
             ModelId = DefaultModelId,
             Enabled = true
-        }, GetProfileRoot(DefaultModelId));
+        }, GetProfileRoot(DefaultModelId), _runtimeSettings.SherpaModelFileName);
+
+    internal SherpaOnnxBackendConfig GetBackendConfig(ProviderProfile profile)
+        => SherpaOnnxConfigParser.Parse(
+            profile,
+            GetProfileRoot(profile.ModelId),
+            _runtimeSettings.SherpaModelFamily,
+            _runtimeSettings.SherpaModelFileName);
+
+    public string GetConfiguredModelFamily() => _runtimeSettings.SherpaModelFamily;
 }

@@ -31,6 +31,7 @@ public sealed class SherpaOnnxPreflightService : ISherpaOnnxPreflightService
             var root = _modelService.GetProfileRoot(SherpaOnnxModelService.DefaultModelId);
             var model = Path.Combine(root, "model.int8.onnx");
             var tokens = Path.Combine(root, "tokens.txt");
+            var family = _modelService.GetConfiguredModelFamily();
 
             State = SherpaNativeReadinessState.PreflightRunning;
             LastError = null;
@@ -49,7 +50,7 @@ public sealed class SherpaOnnxPreflightService : ISherpaOnnxPreflightService
             var psi = new ProcessStartInfo
             {
                 FileName = helperPath,
-                Arguments = $"\"{model}\" \"{tokens}\"",
+                Arguments = $"\"{model}\" \"{tokens}\" \"{family}\"",
                 CreateNoWindow = true,
                 UseShellExecute = false,
                 RedirectStandardOutput = true,

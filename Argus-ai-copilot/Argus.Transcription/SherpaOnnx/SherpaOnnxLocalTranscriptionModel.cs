@@ -121,14 +121,15 @@ internal sealed class SherpaOnnxLocalTranscriptionModel : ITranscriptionModel
             if (!_assetValidation.IsValid)
                 throw new FileNotFoundException(_assetValidation.ToUserMessage(), _assetValidation.ModelPath);
 
-            _config = SherpaOnnxConfigParser.Parse(_profile, _profileRoot);
+            _config = _modelService.GetBackendConfig(_profile);
 
             _recognizer = new OfflineRecognizer(BuildRecognizerConfig(_config));
 
             _logger.LogInformation(
-                "[SherpaSTT] provider={Provider} modelId={ModelId} inProcess={InProcess} profileRoot={Root}",
+                "[SherpaSTT] provider={Provider} modelId={ModelId} family={Family} inProcess={InProcess} profileRoot={Root}",
                 ProviderId,
                 _profile.ModelId,
+                _config.Family,
                 true,
                 _profileRoot);
         }
@@ -204,6 +205,49 @@ internal sealed class SherpaOnnxLocalTranscriptionModel : ITranscriptionModel
 
     private static OfflineRecognizerConfig BuildRecognizerConfig(SherpaOnnxBackendConfig config)
     {
+        var modelConfig = new OfflineModelConfig
+        {
+            NumThreads = config.NumThreads,
+            Debug = config.Debug ? 1 : 0,
+            Provider = config.Provider,
+            Tokens = config.Tokens,
+            ModelType = config.ModelType,
+            ModelingUnit = config.ModelingUnit,
+            BpeVocab = config.BpeVocab
+        };
+
+        switch (config.Family)
+        {
+            case "omnilingual_offline_ctc":
+                modelConfig.Omnilingual = new OfflineOmnilingualAsrCtcModelConfig
+                {
+                    Model = config.Model
+                };
+                break;
+            case "wenet_ctc":
+                modelConfig.WenetCtc = new OfflineWenetCtcModelConfig
+                {
+                    Model = config.Model
+                };
+                break;
+            case "zipformer_ctc":
+                modelConfig.ZipformerCtc = new OfflineZipformerCtcModelConfig
+                {
+                    Model = config.Model
+                };
+                break;
+            case "sense_voice":
+                modelConfig.SenseVoice = new OfflineSenseVoiceModelConfig
+                {
+                    Model = config.Model,
+                    Language = "auto",
+                    UseInverseTextNormalization = 0
+                };
+                break;
+            default:
+                throw new InvalidOperationException($"Unsupported Sherpa family '{config.Family}'.");
+        }
+
         return new OfflineRecognizerConfig
         {
             FeatConfig = new FeatureConfig
@@ -211,20 +255,7 @@ internal sealed class SherpaOnnxLocalTranscriptionModel : ITranscriptionModel
                 SampleRate = 16_000,
                 FeatureDim = 80
             },
-            ModelConfig = new OfflineModelConfig
-            {
-                NumThreads = config.NumThreads,
-                Debug = config.Debug ? 1 : 0,
-                Provider = config.Provider,
-                Tokens = config.Tokens,
-                ModelType = config.ModelType,
-                ModelingUnit = config.ModelingUnit,
-                BpeVocab = config.BpeVocab,
-                Omnilingual = new OfflineOmnilingualAsrCtcModelConfig
-                {
-                    Model = config.Model
-                }
-            },
+            ModelConfig = modelConfig,
             DecodingMethod = "greedy_search",
             MaxActivePaths = 4,
             BlankPenalty = 0f
