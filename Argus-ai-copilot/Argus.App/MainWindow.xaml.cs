@@ -413,6 +413,16 @@ public partial class MainWindow : Window
             MinWidth          = 60
         };
 
+        var languageLabel = new TextBlock
+        {
+            Text              = string.IsNullOrWhiteSpace(seg.Language) ? "?" : seg.Language!.Trim().ToLowerInvariant(),
+            FontSize          = 10,
+            Foreground        = new SolidColorBrush(System.Windows.Media.Color.FromRgb(0x15, 0x65, 0xC0)),
+            VerticalAlignment = VerticalAlignment.Top,
+            Margin            = new Thickness(0, 2, 8, 0),
+            MinWidth          = 24
+        };
+
         var textBlock = new TextBlock
         {
             Text         = seg.Text,
@@ -424,6 +434,7 @@ public partial class MainWindow : Window
         var content = new StackPanel { Orientation = System.Windows.Controls.Orientation.Horizontal };
         content.Children.Add(timeLabel);
         content.Children.Add(speakerLabel);
+        content.Children.Add(languageLabel);
         content.Children.Add(textBlock);
 
         return new Border

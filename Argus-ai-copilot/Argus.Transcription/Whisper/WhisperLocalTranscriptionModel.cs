@@ -5,6 +5,7 @@ using Argus.Core.Domain.Entities;
 using Argus.Core.Domain.Enums;
 using Argus.Core.Domain.ValueObjects;
 using Microsoft.Extensions.Logging;
+using System.Diagnostics;
 using WhisperFactory = Whisper.net.WhisperFactory;
 
 namespace Argus.Transcription.Whisper;
@@ -41,6 +42,11 @@ internal sealed class WhisperLocalTranscriptionModel : ITranscriptionModel
     public async Task<TranscriptionResponse> TranscribeAsync(
         TranscriptionRequest request, CancellationToken ct = default)
     {
+        var totalStopwatch = Stopwatch.StartNew();
+        var ensureModelMs = 0d;
+        var buildMs = 0d;
+        var audioOpenMs = 0d;
+        var processMs = 0d;
         try
         {
             if (!File.Exists(request.AudioFilePath))
@@ -49,8 +55,11 @@ internal sealed class WhisperLocalTranscriptionModel : ITranscriptionModel
             WhisperFactory factory;
             try
             {
+                var ensureModelStopwatch = Stopwatch.StartNew();
                 factory = await _modelService.EnsureModelAsync(_profile.ModelId, ct)
                     .ConfigureAwait(false);
+                ensureModelStopwatch.Stop();
+                ensureModelMs = ensureModelStopwatch.Elapsed.TotalMilliseconds;
             }
             catch (Exception ex)
             {
@@ -65,21 +74,28 @@ internal sealed class WhisperLocalTranscriptionModel : ITranscriptionModel
 
             // Build a processor for this request (processors are not thread-safe; one per call).
             // In Whisper.net 1.8.0 ProcessAsync returns IAsyncEnumerable<SegmentData>.
+            var buildStopwatch = Stopwatch.StartNew();
             var processorBuilder = factory.CreateBuilder();
 
             if (!string.IsNullOrWhiteSpace(request.Language))
                 processorBuilder = processorBuilder.WithLanguage(request.Language);
 
             using var processor = processorBuilder.Build();
+            buildStopwatch.Stop();
+            buildMs = buildStopwatch.Elapsed.TotalMilliseconds;
 
+            var audioOpenStopwatch = Stopwatch.StartNew();
             await using var audioStream =
                 new FileStream(request.AudioFilePath, FileMode.Open, FileAccess.Read,
                     FileShare.Read, bufferSize: 65536, useAsync: true);
+            audioOpenStopwatch.Stop();
+            audioOpenMs = audioOpenStopwatch.Elapsed.TotalMilliseconds;
 
             _logger.LogDebug(
                 "[WhisperLocal] Starting ProcessAsync. ModelId={ModelId} File='{File}'",
                 _profile.ModelId, request.AudioFilePath);
 
+            var processStopwatch = Stopwatch.StartNew();
             await foreach (var seg in processor.ProcessAsync(audioStream, ct).ConfigureAwait(false))
             {
                 var text = seg.Text?.Trim() ?? string.Empty;
@@ -108,6 +124,8 @@ internal sealed class WhisperLocalTranscriptionModel : ITranscriptionModel
                     Language    = segmentLanguage
                 });
             }
+            processStopwatch.Stop();
+            processMs = processStopwatch.Elapsed.TotalMilliseconds;
 
             var fullText = textBuilder.ToString().Trim();
             var detectedLanguage = ResolveDetectedLanguage(segments);
@@ -121,6 +139,18 @@ internal sealed class WhisperLocalTranscriptionModel : ITranscriptionModel
             _logger.LogInformation(
                 "[WhisperLocal] Transcription complete. ModelId={ModelId} Segments={Count} TextLength={Len}",
                 _profile.ModelId, segments.Count, fullText.Length);
+
+            _logger.LogInformation(
+                "[WhisperTiming] modelId={ModelId} requestLanguage={RequestLanguage} ensureModelMs={EnsureModelMs:F1} buildMs={BuildMs:F1} audioOpenMs={AudioOpenMs:F1} processMs={ProcessMs:F1} totalMs={TotalMs:F1} segments={Segments} detectedLanguage={DetectedLanguage}",
+                _profile.ModelId,
+                request.Language ?? "(auto)",
+                ensureModelMs,
+                buildMs,
+                audioOpenMs,
+                processMs,
+                totalStopwatch.Elapsed.TotalMilliseconds,
+                segments.Count,
+                detectedLanguage ?? "(none)");
 
             return new TranscriptionResponse
             {

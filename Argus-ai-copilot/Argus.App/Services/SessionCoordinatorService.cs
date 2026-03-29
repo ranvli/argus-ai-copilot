@@ -609,6 +609,17 @@ internal sealed class SessionCoordinatorService
         _transcriptBuffer.Push(meaningfulSegments);
         var recentText = _transcriptBuffer.GetRecentText(10);
         var intent     = _intentDetector.Detect(meaningfulSegments);
+        var assistantTriggered = intent.HasIntent;
+
+        var newestSegmentAt = meaningfulSegments.Max(segment => segment.CreatedAt);
+        var newestSegmentAgeMs = Math.Max(0, (DateTimeOffset.UtcNow - newestSegmentAt).TotalMilliseconds);
+        _logger.LogInformation(
+            "[UiBridgeLatency] segments={Count} newestSegmentAgeMs={AgeMs:F1} intent={Intent} assistantTriggered={Triggered}",
+            meaningfulSegments.Count,
+            newestSegmentAgeMs,
+            intent.Intent,
+            assistantTriggered);
+
         if (intent.HasIntent)
         {
             _assistantReaction.OnIntentDetected(intent, recentText);

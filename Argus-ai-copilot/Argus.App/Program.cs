@@ -7,6 +7,7 @@ using Argus.Core.Contracts.Services;
 using Argus.Infrastructure;
 using Argus.Infrastructure.Storage;
 using Argus.Transcription;
+using Argus.Transcription.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -54,6 +55,9 @@ internal static class Program
 
                 services.Configure<StorageOptions>(
                     ctx.Configuration.GetSection(StorageOptions.SectionName));
+
+                services.Configure<TranscriptionRuntimeSettings>(
+                    ctx.Configuration.GetSection(TranscriptionRuntimeSettings.SectionName));
 
                 // ── Infrastructure: SQLite, repositories, artifact storage ─────
                 // DbInitializer is registered inside this call as a hosted service

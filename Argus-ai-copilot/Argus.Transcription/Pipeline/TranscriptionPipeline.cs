@@ -1,4 +1,5 @@
-﻿using System.Threading.Channels;
+﻿using System.Diagnostics;
+using System.Threading.Channels;
 using Argus.AI.Configuration;
 using Argus.AI.Models;
 using Argus.AI.Providers;
@@ -7,9 +8,11 @@ using Argus.Audio.Diagnostics;
 using Argus.Core.Domain.Entities;
 using Argus.Core.Domain.Enums;
 using Argus.Core.Domain.ValueObjects;
+using Argus.Transcription.Configuration;
 using Argus.Transcription.Text;
 using Argus.Transcription.Whisper;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using NAudio.Wave;
 
 namespace Argus.Transcription.Pipeline;
@@ -34,6 +37,7 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
     private readonly IModelResolver _modelResolver;
     private readonly ILogger<TranscriptionPipeline> _logger;
     private readonly WhisperModelService? _whisperModelService;
+    private readonly TranscriptionRuntimeSettings _runtimeSettings;
 
     // Debug artifact writer: saves the exact WAV payload sent to Whisper for manual inspection.
     // Files are written to %LocalAppData%\ArgusAI\debug\audio\ (or AppData\debug\audio\).
@@ -83,6 +87,7 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
     private bool                     _disposing;
     private bool                     _stopped;
     private bool                     _disposed;
+    private int                      _highQueueStreak;
 
     private const float ChunkNormalizationTargetPeak = 0.45f;
     private const float ChunkNormalizationMinPeak = 0.015f;
@@ -91,6 +96,9 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
     private const float MicLowActivityPeakThreshold = 0.018f;
     private const float MicLowActivityRmsThreshold  = 0.002f;
     private const int LanguageLockRequiredHits = 3;
+    private const int HighQueueWarningThreshold = 3;
+    private const int CriticalQueueWarningThreshold = 5;
+    private const int HighQueueWarningStreak = 3;
     private static readonly TimeSpan MaxMergedMicDuration = TimeSpan.FromSeconds(5);
 
     // â”€â”€ ITranscriptionPipeline â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -102,10 +110,12 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
     public TranscriptionPipeline(
         IModelResolver modelResolver,
         ILogger<TranscriptionPipeline> logger,
+        IOptions<TranscriptionRuntimeSettings> runtimeSettings,
         WhisperModelService? whisperModelService = null)
     {
         _modelResolver       = modelResolver;
         _logger              = logger;
+        _runtimeSettings     = runtimeSettings.Value;
         _whisperModelService = whisperModelService;
 
         // Resolve debug folder: %LocalAppData%\ArgusAI\debug\audio\
@@ -144,6 +154,7 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
         _lockedLanguage        = null;
         _languageCandidate     = null;
         _languageCandidateHits = 0;
+        _highQueueStreak       = 0;
         _stopped               = false;
 
         // â”€â”€ Probe transcription provider once at start time â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -375,11 +386,12 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
                 }
 
                 var pending = (int)_chunkChannel.Reader.Count;
+                ObserveBacklog(pending);
                 _logger.LogDebug(
                     "[Pipeline.ChunkDequeued] Source={Source} ChunkId={Id} Duration={Dur:F1}s RemainingInQueue={Remaining}",
                     chunk.Source, chunk.Id, chunk.Duration.TotalSeconds, pending);
 
-                await ProcessChunkAsync(chunk, ct);
+                await ProcessChunkAsync(chunk, pending, ct);
                 PublishStatus();
             }
         }
@@ -395,18 +407,31 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
         _logger.LogInformation("[Pipeline.DrainLoop] Drain loop finished. SessionId={Id}", _sessionId);
     }
 
-    private async Task ProcessChunkAsync(AudioChunk chunk, CancellationToken ct)
+    private async Task ProcessChunkAsync(AudioChunk chunk, int queueBefore, CancellationToken ct)
     {
+        var totalStopwatch = Stopwatch.StartNew();
+        var queueAgeMs = Math.Max(0, (DateTimeOffset.UtcNow - chunk.CapturedAt).TotalMilliseconds);
+        var stageAction = "not_applicable";
+        var stageDelayMs = 0d;
+        var wavWriteMs = 0d;
+        var providerMs = 0d;
+        var emittedSegments = 0;
+        var emittedOrDropped = "dropped";
+        string? detectedLanguage = null;
+
         if (chunk.Source == AudioSource.Microphone)
         {
-            var decision = StageMicrophoneChunk(chunk);
-            if (decision is null)
+            var staged = StageMicrophoneChunk(chunk);
+            stageAction = staged.Action;
+            stageDelayMs = staged.StageDelay.TotalMilliseconds;
+            if (staged.Chunk is null)
             {
+                LogChunkLatency(chunk, queueAgeMs, queueBefore, stageAction, stageDelayMs, wavWriteMs, providerMs, totalStopwatch.Elapsed.TotalMilliseconds, emittedSegments, detectedLanguage, emittedOrDropped);
                 PublishStatus(transcriptionStatus: TranscriptionPipelineStatus.Idle);
                 return;
             }
 
-            chunk = decision;
+            chunk = staged.Chunk;
         }
 
         // If provider was not resolved at start, set NoProvider status clearly and return.
@@ -415,6 +440,7 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
             _logger.LogDebug(
                 "[Pipeline.Chunk] Dropping chunk {Id} â€” no transcription provider configured.",
                 chunk.Id);
+            LogChunkLatency(chunk, queueAgeMs, queueBefore, stageAction, stageDelayMs, wavWriteMs, providerMs, totalStopwatch.Elapsed.TotalMilliseconds, emittedSegments, detectedLanguage, emittedOrDropped);
             PublishStatus(transcriptionStatus: TranscriptionPipelineStatus.NoProvider);
             return;
         }
@@ -461,7 +487,10 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
             }
 
             PublishStatus(transcriptionStatus: TranscriptionPipelineStatus.Transcribing);
+            var wavWriteStopwatch = Stopwatch.StartNew();
             WriteWav(tempFile, whisperPcm);
+            wavWriteStopwatch.Stop();
+            wavWriteMs = wavWriteStopwatch.Elapsed.TotalMilliseconds;
 
             _logger.LogDebug(
                 "[ChunkGain] inputRms={InputRms:F4} inputPeak={InputPeak:F4} appliedGain={Gain:F2} outputRms={OutputRms:F4} outputPeak={OutputPeak:F4}",
@@ -486,14 +515,23 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
                 chunk.Id, chunk.Source, whisperDuration.TotalSeconds,
                 _transcriptionProvider, _transcriptionModelId, tempFile);
 
+            var (requestLanguage, languageMode) = ResolveRequestLanguage();
+            _logger.LogInformation(
+                "[TxLanguageMode] mode={Mode} language={Language}",
+                languageMode,
+                requestLanguage ?? "(none)");
+
             var request = new TranscriptionRequest
             {
                 AudioFilePath  = tempFile,
-                Language       = _lockedLanguage,
+                Language       = requestLanguage,
                 WordTimestamps = false
             };
 
+            var providerStopwatch = Stopwatch.StartNew();
             var response = await _transcriptionModel.TranscribeAsync(request, ct);
+            providerStopwatch.Stop();
+            providerMs = providerStopwatch.Elapsed.TotalMilliseconds;
 
             if (response.IsError)
             {
@@ -502,6 +540,7 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
                     "[Pipeline.TxError] Transcription provider returned error. " +
                     "ChunkId={Id} Provider={Provider} ModelId={ModelId} Error={Error}",
                     chunk.Id, _transcriptionProvider, _transcriptionModelId, response.ErrorMessage);
+                LogChunkLatency(chunk, queueAgeMs, queueBefore, stageAction, stageDelayMs, wavWriteMs, providerMs, totalStopwatch.Elapsed.TotalMilliseconds, emittedSegments, detectedLanguage, emittedOrDropped);
                 PublishStatus(
                     transcriptionStatus: TranscriptionPipelineStatus.Error,
                     transcriptionError: response.ErrorMessage);
@@ -511,7 +550,7 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
             _lastTranscriptionError = null;
             _lastTranscriptionAt    = DateTimeOffset.UtcNow;
 
-            var detectedLanguage = SanitizeLanguage(response.DetectedLanguage);
+            detectedLanguage = SanitizeLanguage(response.DetectedLanguage);
             var validSegments = TranscriptTextFilter.FilterMeaningfulSegments(response.Segments);
             var effectiveText = TranscriptTextFilter.IsMeaningfulText(response.FullText)
                 ? response.FullText.Trim()
@@ -530,11 +569,12 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
                     response.FullText.Length > 100
                         ? response.FullText[..100] + "â€¦"
                         : response.FullText);
+                LogChunkLatency(chunk, queueAgeMs, queueBefore, stageAction, stageDelayMs, wavWriteMs, providerMs, totalStopwatch.Elapsed.TotalMilliseconds, emittedSegments, detectedLanguage, emittedOrDropped);
                 PublishStatus(transcriptionStatus: TranscriptionPipelineStatus.Idle);
                 return;
             }
 
-            UpdateLanguageLock(detectedLanguage, effectiveText, validSegments, inputRms, inputPeak);
+            UpdateLanguageLock(detectedLanguage, effectiveText, validSegments, inputRms, inputPeak, chunk.Id);
 
             _logger.LogInformation(
                 "[Pipeline.TxResponse] Transcription complete. ChunkId={Id} Segments={SegCount} " +
@@ -555,6 +595,7 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
                     response.FullText.Length > 100
                         ? response.FullText[..100] + "â€¦"
                         : response.FullText);
+                emittedOrDropped = "dropped";
             }
             else if (validSegments.Count == 0 && TranscriptTextFilter.IsMeaningfulText(response.FullText))
             {
@@ -572,6 +613,8 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
                 };
                 var list = (IReadOnlyList<TranscriptSegment>)[synthetic];
                 _segmentCount++;
+                emittedSegments = list.Count;
+                emittedOrDropped = "emitted";
                 _logger.LogInformation(
                     "[Pipeline.Segments] Emitting 1 synthesised segment. SessionId={Id} Text='{Text}'",
                     _sessionId, synthetic.Text.Length > 80 ? synthetic.Text[..80] + "â€¦" : synthetic.Text);
@@ -581,6 +624,8 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
             {
                 var anchored = StampSegments(validSegments, chunk);
                 _segmentCount += anchored.Count;
+                emittedSegments = anchored.Count;
+                emittedOrDropped = "emitted";
 
                 _logger.LogInformation(
                     "[Pipeline.Segments] Emitting {Count} segment(s). SessionId={Id} Preview='{Preview}'",
@@ -595,12 +640,15 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
                 _logger.LogDebug(
                     "[Pipeline.TxResponse] Provider returned empty transcription for chunk {Id} â€” " +
                     "likely silence or below detection threshold.", chunk.Id);
+                emittedOrDropped = "dropped";
             }
 
+            LogChunkLatency(chunk, queueAgeMs, queueBefore, stageAction, stageDelayMs, wavWriteMs, providerMs, totalStopwatch.Elapsed.TotalMilliseconds, emittedSegments, detectedLanguage, emittedOrDropped);
             PublishStatus(transcriptionStatus: TranscriptionPipelineStatus.Idle);
         }
         catch (OperationCanceledException)
         {
+            LogChunkLatency(chunk, queueAgeMs, queueBefore, stageAction, stageDelayMs, wavWriteMs, providerMs, totalStopwatch.Elapsed.TotalMilliseconds, emittedSegments, detectedLanguage, "cancelled");
             _logger.LogDebug("[Pipeline.Chunk] ProcessChunk cancelled for {Id}.", chunk.Id);
         }
         catch (Exception ex)
@@ -610,6 +658,7 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
                 "[Pipeline.TxException] Unexpected exception processing chunk {Id}. " +
                 "Provider={Provider} ModelId={ModelId}",
                 chunk.Id, _transcriptionProvider, _transcriptionModelId);
+            LogChunkLatency(chunk, queueAgeMs, queueBefore, stageAction, stageDelayMs, wavWriteMs, providerMs, totalStopwatch.Elapsed.TotalMilliseconds, emittedSegments, detectedLanguage, "error");
             PublishStatus(
                 transcriptionStatus: TranscriptionPipelineStatus.Error,
                 transcriptionError: ex.Message);
@@ -629,7 +678,7 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
         writer.Write(pcm16kMono16bit, 0, pcm16kMono16bit.Length);
     }
 
-    private AudioChunk? StageMicrophoneChunk(AudioChunk chunk)
+    private ChunkStageDecision StageMicrophoneChunk(AudioChunk chunk)
     {
         var metrics = AnalyzeSpeechActivity(chunk.Data);
         var lowActivity = metrics.IsLowActivity;
@@ -639,33 +688,34 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
             if (!lowActivity)
             {
                 LogLatencyPolicy("send_immediately", chunk.Duration, metrics);
-                return chunk;
+                return new ChunkStageDecision(chunk, "send_immediately", TimeSpan.Zero);
             }
 
             _pendingMicChunk = chunk;
             LogLatencyPolicy("buffer_first_low_signal", chunk.Duration, metrics);
-            return null;
+            return new ChunkStageDecision(null, "buffer_first_low_signal", TimeSpan.Zero);
         }
 
         var merged = MergeChunks(_pendingMicChunk, chunk);
         _pendingMicChunk = null;
         var mergedMetrics = AnalyzeSpeechActivity(merged.Data);
         var mergedLowActivity = mergedMetrics.IsLowActivity;
+        var stageDelay = chunk.CapturedAt - merged.CapturedAt;
 
         if (merged.Duration > MaxMergedMicDuration)
         {
             LogLatencyPolicy("drop_low_signal_exceeded_max_duration", merged.Duration, mergedMetrics);
-            return null;
+            return new ChunkStageDecision(null, "drop_low_signal_exceeded_max_duration", stageDelay);
         }
 
         if (mergedLowActivity)
         {
             LogLatencyPolicy("drop_low_signal_after_single_merge", merged.Duration, mergedMetrics);
-            return null;
+            return new ChunkStageDecision(null, "drop_low_signal_after_single_merge", stageDelay);
         }
 
         LogLatencyPolicy(lowActivity ? "single_merge_and_send" : "merge_and_send", merged.Duration, mergedMetrics);
-        return merged;
+        return new ChunkStageDecision(merged, lowActivity ? "single_merge_and_send" : "merge_and_send", stageDelay);
     }
 
     private static SpeechActivityMetrics AnalyzeSpeechActivity(byte[] data)
@@ -791,7 +841,8 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
         string? text,
         IReadOnlyList<TranscriptSegment> validSegments,
         float inputRms,
-        float inputPeak)
+        float inputPeak,
+        Guid chunkId)
     {
         if (_lockedLanguage is not null)
         {
@@ -804,13 +855,30 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
 
         var hasReliableSegmentLanguage = validSegments.Any(segment =>
             string.Equals(SanitizeLanguage(segment.Language), detectedLanguage, StringComparison.Ordinal));
+        var textValid = IsValidTranscription(text);
+        var deadSignal = IsClearlyDeadSignal(inputRms, inputPeak);
 
         if (detectedLanguage is null ||
             !hasReliableSegmentLanguage ||
-            !IsValidTranscription(text) ||
-            IsClearlyDeadSignal(inputRms, inputPeak))
+            !textValid ||
+            deadSignal)
         {
+            var reason = detectedLanguage is null
+                ? "no_detected_language"
+                : !hasReliableSegmentLanguage
+                    ? "segment_language_unavailable"
+                    : !textValid
+                        ? "invalid_text"
+                        : "dead_signal";
             ResetLanguageCandidate();
+            _logger.LogInformation(
+                "[LanguageDecision] action=reset reason={Reason} chunkId={ChunkId} detected={Detected} textValid={TextValid} rms={Rms:F4} peak={Peak:F4}",
+                reason,
+                chunkId,
+                detectedLanguage ?? "(none)",
+                textValid,
+                inputRms,
+                inputPeak);
             _logger.LogInformation(
                 "[LanguageLock] detected={Detected} locked={Locked}",
                 detectedLanguage ?? "(none)",
@@ -822,10 +890,22 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
         {
             _languageCandidate = detectedLanguage;
             _languageCandidateHits = 1;
+            _logger.LogInformation(
+                "[LanguageDecision] action=candidate reason={Reason} chunkId={ChunkId} candidate={Candidate} hits={Hits}",
+                "candidate_changed",
+                chunkId,
+                _languageCandidate,
+                _languageCandidateHits);
         }
         else
         {
             _languageCandidateHits++;
+            _logger.LogInformation(
+                "[LanguageDecision] action=candidate reason={Reason} chunkId={ChunkId} candidate={Candidate} hits={Hits}",
+                "candidate_confirmed",
+                chunkId,
+                _languageCandidate,
+                _languageCandidateHits);
         }
 
         _logger.LogInformation(
@@ -836,6 +916,11 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
         if (_languageCandidateHits >= LanguageLockRequiredHits)
         {
             _lockedLanguage = _languageCandidate;
+            _logger.LogInformation(
+                "[LanguageDecision] action=lock chunkId={ChunkId} locked={Locked} reason={Reason}",
+                chunkId,
+                _lockedLanguage,
+                "candidate_confirmed");
             ResetLanguageCandidate();
         }
 
@@ -861,6 +946,72 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
         float NormalizedPeak,
         float AppliedGain,
         bool IsLowActivity);
+
+    private readonly record struct ChunkStageDecision(
+        AudioChunk? Chunk,
+        string Action,
+        TimeSpan StageDelay);
+
+    private (string? Language, string Mode) ResolveRequestLanguage()
+    {
+        var forcedLanguage = SanitizeLanguage(_runtimeSettings.ForcedLanguage);
+        if (forcedLanguage is not null)
+            return (forcedLanguage, "forced");
+
+        if (_lockedLanguage is not null)
+            return (_lockedLanguage, "locked");
+
+        return (null, "auto");
+    }
+
+    private void ObserveBacklog(int queueBefore)
+    {
+        if (queueBefore >= HighQueueWarningThreshold)
+            _highQueueStreak++;
+        else
+            _highQueueStreak = 0;
+
+        if (queueBefore >= CriticalQueueWarningThreshold || _highQueueStreak >= HighQueueWarningStreak)
+        {
+            _logger.LogWarning(
+                "[Pipeline.Backlog] queueBefore={QueueBefore} streak={Streak} provider={Provider} model={Model}",
+                queueBefore,
+                _highQueueStreak,
+                _transcriptionProvider,
+                _transcriptionModelId);
+        }
+    }
+
+    private void LogChunkLatency(
+        AudioChunk chunk,
+        double queueAgeMs,
+        int queueBefore,
+        string stageAction,
+        double stageDelayMs,
+        double wavWriteMs,
+        double providerMs,
+        double totalMs,
+        int emittedSegments,
+        string? detectedLanguage,
+        string result)
+    {
+        var queueAfter = (int)_chunkChannel.Reader.Count;
+        _logger.LogInformation(
+            "[ChunkLatency] chunkId={ChunkId} source={Source} queueAgeMs={QueueAgeMs:F1} stageAction={StageAction} stageDelayMs={StageDelayMs:F1} wavWriteMs={WavWriteMs:F1} providerMs={ProviderMs:F1} totalMs={TotalMs:F1} queueBefore={QueueBefore} queueAfter={QueueAfter} emittedSegments={Segments} detectedLanguage={DetectedLanguage} result={Result}",
+            chunk.Id,
+            chunk.Source,
+            queueAgeMs,
+            stageAction,
+            stageDelayMs,
+            wavWriteMs,
+            providerMs,
+            totalMs,
+            queueBefore,
+            queueAfter,
+            emittedSegments,
+            detectedLanguage ?? "(none)",
+            result);
+    }
 
     private List<TranscriptSegment> StampSegments(IReadOnlyList<TranscriptSegment> raw, AudioChunk chunk)
     {
