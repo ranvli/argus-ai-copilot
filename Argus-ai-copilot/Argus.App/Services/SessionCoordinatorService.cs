@@ -530,7 +530,7 @@ internal sealed class SessionCoordinatorService
                 SystemAudioStatus = discoveredOutputDevice is null ? AudioCaptureStatus.NoDevice : AudioCaptureStatus.Idle,
                 SystemAudioDevice = discoveredOutputDevice?.Name ?? string.Empty,
                 TranscriptionStatus = TranscriptionPipelineStatus.Error,
-                TranscriptionConfigured = false,
+                TranscriptionConfigured = true,
                 TranscriptionProvider = "SherpaOnnx",
                 TranscriptionModel = "multilingual-streaming",
                 TranscriptionError = ex.Message,

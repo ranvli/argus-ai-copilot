@@ -275,7 +275,7 @@ public partial class MainWindow : Window
             : ErrorBrush;
 
         // Not-configured warning banner
-        if (!audio.TranscriptionConfigured && audio.MicrophoneStatus == AudioCaptureStatus.Capturing)
+        if (!audio.TranscriptionConfigured && audio.MicrophoneStatus == AudioCaptureStatus.Capturing && audio.TranscriptionProvider == "SherpaOnnx")
         {
             TranscriptionNotConfiguredBanner.Visibility  = Visibility.Visible;
             TranscriptionNotConfiguredText.Text =
