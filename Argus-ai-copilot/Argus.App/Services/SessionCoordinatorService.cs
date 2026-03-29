@@ -590,6 +590,13 @@ internal sealed class SessionCoordinatorService
 
         _transcriptSegmentCount += segments.Count;
 
+        _logger.LogInformation(
+            "[UIBridge] Re-raising transcript segments to UI. Count={Count} First='{First}'",
+            segments.Count,
+            segments.Count > 0
+                ? (segments[0].Text.Length > 120 ? segments[0].Text[..120] + "…" : segments[0].Text)
+                : string.Empty);
+
         // Push to rolling buffer and check for intent
         _transcriptBuffer.Push(segments);
         var recentText = _transcriptBuffer.GetRecentText(10);

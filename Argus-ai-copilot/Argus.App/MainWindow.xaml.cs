@@ -343,6 +343,9 @@ public partial class MainWindow : Window
 
     private void OnTranscriptSegmentsReceived(object? sender, IReadOnlyList<TranscriptSegment> segments)
     {
+        _logger.LogInformation(
+            "[MainWindow.Transcript] Received {Count} segment(s)",
+            segments.Count);
         Dispatcher.InvokeAsync(() => AppendTranscriptSegments(segments));
     }
 
@@ -351,6 +354,17 @@ public partial class MainWindow : Window
         foreach (var seg in segments)
         {
             if (string.IsNullOrWhiteSpace(seg.Text)) continue;
+
+            var text = seg.Text.Trim();
+            if (string.Equals(text, "[BLANK_AUDIO]", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(text, "[inaudible]", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            _logger.LogInformation(
+                "[MainWindow.Transcript] Appending segment. Text='{Text}'",
+                text.Length > 120 ? text[..120] + "…" : text);
 
             // Show the list panel + scroll container on first segment
             if (_displayedSegments == 0)
