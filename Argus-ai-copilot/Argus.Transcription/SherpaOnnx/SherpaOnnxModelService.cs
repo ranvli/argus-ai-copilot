@@ -2,6 +2,7 @@ using Argus.Infrastructure.Storage;
 using Argus.Transcription.Configuration;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using Argus.AI.Configuration;
 
 namespace Argus.Transcription.SherpaOnnx;
 
@@ -45,5 +46,30 @@ public sealed class SherpaOnnxModelService
             "[SherpaModelRoot] modelId={ModelId} root={Root}",
             modelId,
             GetProfileRoot(modelId));
+    }
+
+    public SherpaOnnxAssetValidationResult ValidateAssets(ProviderProfile profile)
+    {
+        var root = GetProfileRoot(profile.ModelId);
+        var result = SherpaOnnxConfigParser.ValidateAssets(profile, root);
+
+        _logger.LogInformation(
+            "[SherpaAssets] root={Root} profileJsonExists={ProfileJsonExists}",
+            result.ProfileRoot,
+            result.ProfileJsonExists);
+
+        foreach (var missing in result.MissingFiles)
+        {
+            _logger.LogError("[SherpaAssets] missing={Missing}", missing);
+        }
+
+        if (!result.IsValid)
+        {
+            _logger.LogError(
+                "[SherpaStartup] validationFailed reason={Reason}",
+                result.Reason ?? "unknown");
+        }
+
+        return result;
     }
 }

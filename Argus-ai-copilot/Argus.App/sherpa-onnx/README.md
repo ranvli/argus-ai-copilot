@@ -16,3 +16,35 @@ Example expected files:
 - `lid-decoder.onnx`
 - language-routed ASR files (zipformer/transducer/omnilingual/etc.)
 - diarization segmentation and embedding models
+
+Expected default folder tree for the active test profile:
+
+```text
+sherpa-onnx/
+└─ multilingual-streaming/
+   ├─ profile.json
+   ├─ tokens.txt
+   ├─ vad/
+   │  └─ silero_vad.onnx
+   ├─ lid/
+   │  ├─ lid-encoder.onnx
+   │  └─ lid-decoder.onnx
+   ├─ diarization/
+   │  ├─ segmentation.onnx
+   │  └─ speaker-embedding.onnx
+   └─ asr/
+      ├─ es/
+      │  └─ model.onnx
+      ├─ en/
+      │  └─ model.onnx
+      ├─ pt/
+      │  └─ model.onnx
+      ├─ it/
+      │  └─ model.onnx
+      ├─ de/
+      │  └─ model.onnx
+      └─ zh/
+         └─ model.onnx
+```
+
+If any referenced file is missing, Argus will fail clearly on Sherpa startup and will not fall back to Whisper.

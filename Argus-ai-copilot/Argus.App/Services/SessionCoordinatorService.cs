@@ -519,6 +519,18 @@ internal sealed class SessionCoordinatorService
         catch (Exception ex)
         {
             _logger.LogError(ex, "[Pipeline.Start] Failed to start transcription pipeline — session continues without audio.");
+            _audioStatus = new AudioStatusSnapshot
+            {
+                MicrophoneStatus = AudioCaptureStatus.DeviceError,
+                SystemAudioStatus = AudioCaptureStatus.NoDevice,
+                TranscriptionStatus = TranscriptionPipelineStatus.Error,
+                TranscriptionConfigured = false,
+                TranscriptionProvider = "SherpaOnnx",
+                TranscriptionModel = "multilingual-streaming",
+                TranscriptionError = ex.Message,
+                TranscriptionLanguageMode = "forced/es"
+            };
+            AudioStatusChanged?.Invoke(this, _audioStatus);
             // Clean up the scope since startup failed.
             if (_pipelineScope is { } failedScope)
                 await failedScope.DisposeAsync();

@@ -284,6 +284,13 @@ public partial class MainWindow : Window
                 "Check that ArgusAI:Profiles contains a WhisperNetLocal profile with \"Enabled\": true " +
                 "and that ArgusAI:Defaults:Transcription is set to \"WhisperNetLocal\" in appsettings.json.";
         }
+        else if (!string.IsNullOrWhiteSpace(audio.TranscriptionError) &&
+                 string.Equals(audio.TranscriptionProvider, "SherpaOnnx", StringComparison.OrdinalIgnoreCase))
+        {
+            TranscriptionNotConfiguredBanner.Visibility = Visibility.Visible;
+            TranscriptionNotConfiguredText.Text =
+                $"? SherpaOnnxLocal assets are missing or incomplete.\n{audio.TranscriptionError}";
+        }
         else
         {
             TranscriptionNotConfiguredBanner.Visibility = Visibility.Collapsed;

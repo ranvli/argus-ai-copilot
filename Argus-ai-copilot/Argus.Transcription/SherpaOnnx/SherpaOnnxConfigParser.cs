@@ -5,6 +5,80 @@ namespace Argus.Transcription.SherpaOnnx;
 
 internal static class SherpaOnnxConfigParser
 {
+    public static SherpaOnnxAssetValidationResult ValidateAssets(ProviderProfile profile, string profileRoot)
+    {
+        var profileJsonPath = Path.Combine(profileRoot, "profile.json");
+        var profileJsonExists = File.Exists(profileJsonPath);
+
+        if (!profileJsonExists)
+        {
+            return new SherpaOnnxAssetValidationResult
+            {
+                IsValid = false,
+                ProfileRoot = profileRoot,
+                ProfileJsonPath = profileJsonPath,
+                ProfileJsonExists = false,
+                Reason = "profile_json_missing",
+                MissingFiles = [profileJsonPath]
+            };
+        }
+
+        using var stream = File.OpenRead(profileJsonPath);
+        using var document = JsonDocument.Parse(stream);
+        var root = document.RootElement;
+        var missing = new List<string>();
+
+        static string ReadString(JsonElement root, string name, string fallback = "")
+            => root.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
+                ? value.GetString() ?? fallback
+                : fallback;
+
+        static void AddIfMissing(List<string> missing, string path)
+        {
+            if (!string.IsNullOrWhiteSpace(path) && !File.Exists(path))
+                missing.Add(path);
+        }
+
+        AddIfMissing(missing, Path.Combine(profileRoot, ReadString(root, "tokens", "tokens.txt")));
+
+        if (root.TryGetProperty("vad", out var vadElement))
+            AddIfMissing(missing, Path.Combine(profileRoot, ReadString(vadElement, "model", "silero_vad.onnx")));
+
+        if (root.TryGetProperty("lid", out var lidElement))
+        {
+            AddIfMissing(missing, Path.Combine(profileRoot, ReadString(lidElement, "encoder", "lid-encoder.onnx")));
+            AddIfMissing(missing, Path.Combine(profileRoot, ReadString(lidElement, "decoder", "lid-decoder.onnx")));
+        }
+
+        if (root.TryGetProperty("diarization", out var diarizationElement))
+        {
+            AddIfMissing(missing, Path.Combine(profileRoot, ReadString(diarizationElement, "segmentationModel", "diarization-segmentation.onnx")));
+            AddIfMissing(missing, Path.Combine(profileRoot, ReadString(diarizationElement, "embeddingModel", "speaker-embedding.onnx")));
+        }
+
+        if (root.TryGetProperty("routes", out var routesElement) && routesElement.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var item in routesElement.EnumerateObject())
+            {
+                var route = item.Value;
+                AddIfMissing(missing, Path.Combine(profileRoot, ReadString(route, "model", "")));
+                AddIfMissing(missing, Path.Combine(profileRoot, ReadString(route, "encoder", "")));
+                AddIfMissing(missing, Path.Combine(profileRoot, ReadString(route, "decoder", "")));
+                AddIfMissing(missing, Path.Combine(profileRoot, ReadString(route, "joiner", "")));
+            }
+        }
+
+        return new SherpaOnnxAssetValidationResult
+        {
+            IsValid = missing.Count == 0,
+            ProfileRoot = profileRoot,
+            ProfileJsonPath = profileJsonPath,
+            ProfileJsonExists = true,
+            Reason = missing.Count == 0 ? "ok" : "referenced_assets_missing",
+            MissingFiles = missing
+        };
+    }
+
     public static SherpaOnnxBackendConfig Parse(ProviderProfile profile, string profileRoot)
     {
         var jsonPath = Path.Combine(profileRoot, "profile.json");

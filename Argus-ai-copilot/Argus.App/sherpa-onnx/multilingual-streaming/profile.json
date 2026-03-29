@@ -1,0 +1,74 @@
+{
+  "provider": "cpu",
+  "numThreads": 4,
+  "debug": false,
+  "tokens": "tokens.txt",
+  "modelType": "zipformer2_ctc",
+  "modelingUnit": "bpe",
+  "bpeVocab": "",
+  "vad": {
+    "model": "vad/silero_vad.onnx",
+    "threshold": 0.5,
+    "minSilenceDuration": 0.25,
+    "minSpeechDuration": 0.25,
+    "windowSize": 512,
+    "maxSpeechDuration": 30.0
+  },
+  "lid": {
+    "encoder": "lid/lid-encoder.onnx",
+    "decoder": "lid/lid-decoder.onnx",
+    "tailPaddings": 12
+  },
+  "diarization": {
+    "segmentationModel": "diarization/segmentation.onnx",
+    "embeddingModel": "diarization/speaker-embedding.onnx",
+    "numClusters": 2,
+    "threshold": 0.6,
+    "minDurationOn": 0.2,
+    "minDurationOff": 0.2
+  },
+  "routes": {
+    "es": {
+      "family": "zipformer2_ctc",
+      "model": "asr/es/model.onnx",
+      "language": "es",
+      "task": "transcribe"
+    },
+    "en": {
+      "family": "zipformer2_ctc",
+      "model": "asr/en/model.onnx",
+      "language": "en",
+      "task": "transcribe"
+    },
+    "pt": {
+      "family": "zipformer2_ctc",
+      "model": "asr/pt/model.onnx",
+      "language": "pt",
+      "task": "transcribe"
+    },
+    "it": {
+      "family": "zipformer2_ctc",
+      "model": "asr/it/model.onnx",
+      "language": "it",
+      "task": "transcribe"
+    },
+    "de": {
+      "family": "zipformer2_ctc",
+      "model": "asr/de/model.onnx",
+      "language": "de",
+      "task": "transcribe"
+    },
+    "zh": {
+      "family": "zipformer2_ctc",
+      "model": "asr/zh/model.onnx",
+      "language": "zh",
+      "task": "transcribe"
+    },
+    "default": {
+      "family": "zipformer2_ctc",
+      "model": "asr/en/model.onnx",
+      "language": "en",
+      "task": "transcribe"
+    }
+  }
+}

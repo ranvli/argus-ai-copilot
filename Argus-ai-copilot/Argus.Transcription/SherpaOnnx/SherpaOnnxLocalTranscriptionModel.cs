@@ -25,6 +25,7 @@ internal sealed class SherpaOnnxLocalTranscriptionModel : ITranscriptionModel
     private OfflineSpeakerDiarization? _diarization;
     private SherpaOnnxBackendConfig? _config;
     private string _profileRoot = string.Empty;
+    private SherpaOnnxAssetValidationResult? _assetValidation;
 
     public SherpaOnnxLocalTranscriptionModel(
         ProviderProfile profile,
@@ -134,6 +135,10 @@ internal sealed class SherpaOnnxLocalTranscriptionModel : ITranscriptionModel
 
             _profileRoot = _modelService.GetProfileRoot(_profile.ModelId);
             _modelService.LogModelRoot(_profile.ModelId);
+            _assetValidation = _modelService.ValidateAssets(_profile);
+            if (!_assetValidation.IsValid)
+                throw new FileNotFoundException(_assetValidation.ToUserMessage(), _assetValidation.ProfileJsonPath);
+
             _config = SherpaOnnxConfigParser.Parse(_profile, _profileRoot);
 
             _recognizer = new OnlineRecognizer(BuildRecognizerConfig(_config, SelectRoute("es")));
