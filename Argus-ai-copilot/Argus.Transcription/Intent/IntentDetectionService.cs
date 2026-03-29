@@ -1,4 +1,6 @@
 using Microsoft.Extensions.Logging;
+using System.Globalization;
+using System.Text;
 using System.Text.RegularExpressions;
 
 namespace Argus.Transcription.Intent;
@@ -56,6 +58,52 @@ public sealed class IntentDetectionService
         ("what do you think", DetectedIntent.GeneralHelp),
     ];
 
+    private static readonly string[] QuestionPhrases =
+    [
+        "argus que le respondo",
+        "argus qué le respondo",
+        "que hago ahora",
+        "qué hago ahora",
+        "que le respondo",
+        "qué le respondo",
+        "que digo",
+        "qué digo",
+        "que hago",
+        "qué hago",
+        "que respondo",
+        "qué respondo",
+        "como respondo",
+        "cómo respondo",
+        "por que",
+        "por qué",
+        "cuando",
+        "cuándo",
+        "donde",
+        "dónde",
+        "cual",
+        "cuál",
+        "deberia",
+        "debería",
+        "puedo",
+        "me recomiendas",
+        "what should i say",
+        "what should i do",
+        "what do i say",
+        "how should i respond",
+        "how do i respond",
+        "can you help me",
+        "could i",
+        "should i",
+        "can i",
+        "do i",
+        "what",
+        "why",
+        "how",
+        "when",
+        "where",
+        "who",
+    ];
+
     // Strip punctuation but keep spaces and alphanumeric (including accented chars)
     private static readonly Regex StripPunctuation =
         new(@"[^\p{L}\p{N}\s]", RegexOptions.Compiled);
@@ -78,6 +126,20 @@ public sealed class IntentDetectionService
             return IntentDetectionResult.None;
 
         var normalised = Normalise(recentText);
+        var folded = FoldText(normalised);
+        if (IsTooShortOrNoisy(folded))
+            return IntentDetectionResult.None;
+
+        var questionMatch = FindQuestionPhrase(recentText, normalised, folded);
+        if (questionMatch is not null)
+        {
+            _logger.LogInformation(
+                "[QuestionIntent] detected={Detected} text={Preview}",
+                questionMatch,
+                Truncate(recentText, 120));
+
+            return new IntentDetectionResult(DetectedIntent.QuestionForAssistant, questionMatch, recentText);
+        }
 
         // 1. Check for help/advice phrases first (more specific → higher priority)
         foreach (var (phrase, intent) in HelpPhrases)
@@ -117,6 +179,20 @@ public sealed class IntentDetectionService
         return CollapseSpaces.Replace(stripped, " ").Trim();
     }
 
+    private static string FoldText(string text)
+    {
+        var normalized = text.Normalize(NormalizationForm.FormD);
+        var sb = new StringBuilder(normalized.Length);
+
+        foreach (var ch in normalized)
+        {
+            if (CharUnicodeInfo.GetUnicodeCategory(ch) != UnicodeCategory.NonSpacingMark)
+                sb.Append(ch);
+        }
+
+        return sb.ToString().Normalize(NormalizationForm.FormC);
+    }
+
     /// <summary>
     /// Whole-word / whole-phrase match: the phrase must appear as a complete
     /// token sequence (preceded and followed by a word boundary or string edge).
@@ -139,4 +215,39 @@ public sealed class IntentDetectionService
 
     private static string Truncate(string s, int max) =>
         s.Length <= max ? s : s[..max] + "…";
+
+    private static string? FindQuestionPhrase(string originalText, string normalised, string folded)
+    {
+        var hasQuestionPunctuation = originalText.Contains('?') || originalText.Contains('¿');
+
+        foreach (var phrase in QuestionPhrases)
+        {
+            var foldedPhrase = FoldText(phrase);
+            if (ContainsPhrase(folded, foldedPhrase))
+                return phrase;
+        }
+
+        return hasQuestionPunctuation && folded.Length >= 8 && ContainsAnyLetter(folded)
+            ? "question_punctuation"
+            : null;
+    }
+
+    private static bool IsTooShortOrNoisy(string text)
+    {
+        if (text.Length < 8)
+            return true;
+
+        var words = text.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (words.Length < 2)
+            return true;
+
+        if (!ContainsAnyLetter(text))
+            return true;
+
+        var distinctWords = words.Distinct(StringComparer.Ordinal).Count();
+        return distinctWords == 1 && words.Length <= 3;
+    }
+
+    private static bool ContainsAnyLetter(string text)
+        => text.Any(char.IsLetter);
 }

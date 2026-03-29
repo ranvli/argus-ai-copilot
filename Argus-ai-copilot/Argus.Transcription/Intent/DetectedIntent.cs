@@ -20,6 +20,9 @@ public enum DetectedIntent
 
     /// <summary>General help or assistance request.</summary>
     GeneralHelp,
+
+    /// <summary>User asked a natural-language question directed at the assistant.</summary>
+    QuestionForAssistant,
 }
 
 /// <summary>Result of a single intent detection pass over recent transcript text.</summary>

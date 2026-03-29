@@ -3,6 +3,7 @@ using Argus.AI.Models;
 using Argus.AI.Providers;
 using Argus.Transcription.Intent;
 using Microsoft.Extensions.Logging;
+using System.Text.RegularExpressions;
 
 namespace Argus.App.Services;
 
@@ -20,6 +21,10 @@ public sealed class AssistantReactionService : IAssistantReactionPublisher, IAsy
 
     private CancellationTokenSource? _currentCts;
     private readonly SemaphoreSlim _gate = new(1, 1);
+    private DateTimeOffset _lastQuestionReactionAt = DateTimeOffset.MinValue;
+    private string _lastQuestionFingerprint = string.Empty;
+    private static readonly TimeSpan QuestionCooldown = TimeSpan.FromSeconds(12);
+    private static readonly Regex CollapseSpaces = new(@"\s+", RegexOptions.Compiled);
 
     public AssistantReactionSnapshot Current { get; private set; } =
         AssistantReactionSnapshot.Empty;
@@ -41,6 +46,24 @@ public sealed class AssistantReactionService : IAssistantReactionPublisher, IAsy
     public void OnIntentDetected(IntentDetectionResult result, string recentTranscriptText)
     {
         if (!result.HasIntent) return;
+
+        if (result.Intent == DetectedIntent.QuestionForAssistant)
+        {
+            var fingerprint = BuildQuestionFingerprint(result.ContextText);
+            var now = DateTimeOffset.UtcNow;
+            if (fingerprint.Length > 0 &&
+                string.Equals(fingerprint, _lastQuestionFingerprint, StringComparison.Ordinal) &&
+                now - _lastQuestionReactionAt < QuestionCooldown)
+            {
+                _logger.LogInformation(
+                    "[ReactionCooldown] skipped={Reason}",
+                    "same_question_within_cooldown");
+                return;
+            }
+
+            _lastQuestionFingerprint = fingerprint;
+            _lastQuestionReactionAt = now;
+        }
 
         // Cancel any in-flight request and start a new one
         var prev = Interlocked.Exchange(ref _currentCts, new CancellationTokenSource());
@@ -185,6 +208,12 @@ public sealed class AssistantReactionService : IAssistantReactionPublisher, IAsy
             "The user wants you to explain or summarise what is currently being discussed. " +
             "Give a short, clear summary in the same language as the conversation.",
 
+        DetectedIntent.QuestionForAssistant =>
+            "You are Argus, a real-time desktop assistant. " +
+            "The user asked a natural spoken question about their current situation. " +
+            "Answer briefly, practically, and in the same language as the conversation. " +
+            "Use the current app/window context when relevant.",
+
         _ =>
             "You are Argus, a helpful real-time AI assistant. " +
             "The user has addressed you during a live conversation. " +
@@ -208,9 +237,22 @@ public sealed class AssistantReactionService : IAssistantReactionPublisher, IAsy
             DetectedIntent.ExplainContext =>
                 $"Recent conversation:\n\"{context}\"\n\nWhat is being discussed here?",
 
+            DetectedIntent.QuestionForAssistant =>
+                $"Recent conversation and app context:\n\"{context}\"\n\nAnswer the user's question directly and briefly.",
+
             _ =>
                 $"Recent conversation:\n\"{context}\"\n\nHow can you help me right now?"
         };
+    }
+
+    private static string BuildQuestionFingerprint(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return string.Empty;
+
+        var lowered = text.ToLowerInvariant();
+        var collapsed = CollapseSpaces.Replace(lowered, " ").Trim();
+        return collapsed.Length <= 160 ? collapsed : collapsed[..160];
     }
 
     public async ValueTask DisposeAsync()
