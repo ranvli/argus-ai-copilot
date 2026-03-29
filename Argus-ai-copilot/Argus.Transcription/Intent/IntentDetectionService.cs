@@ -1,4 +1,5 @@
 using Argus.Core.Domain.Entities;
+using Argus.Transcription.Text;
 using Microsoft.Extensions.Logging;
 using System.Globalization;
 using System.Text;
@@ -234,7 +235,7 @@ public sealed class IntentDetectionService
 
         var texts = recentSegments
             .Select(segment => segment.Text?.Trim())
-            .Where(static text => !string.IsNullOrWhiteSpace(text))
+            .Where(static text => TranscriptTextFilter.IsMeaningfulText(text))
             .TakeLast(2)
             .Cast<string>()
             .ToList();

@@ -24,6 +24,7 @@ namespace Argus.Audio.Capture;
 public sealed class SystemAudioCaptureSource : IAudioCaptureSource, IDisposable
 {
     private readonly ILogger<SystemAudioCaptureSource> _logger;
+    private readonly Lock _stateLock = new();
 
     private const int TargetSampleRate    = 16_000;
     private const int TargetChannels      = 1;
@@ -43,6 +44,8 @@ public sealed class SystemAudioCaptureSource : IAudioCaptureSource, IDisposable
     private MemoryStream           _pcmBuffer = new();
     private Guid                   _sessionId;
     private volatile bool          _paused;
+    private volatile bool          _stopping;
+    private volatile bool          _disposed;
     private string?                _deviceName;
     private WaveFormat?            _nativeFormat;
 
@@ -78,6 +81,8 @@ public sealed class SystemAudioCaptureSource : IAudioCaptureSource, IDisposable
 
     public async Task StartAsync(Guid sessionId, CancellationToken ct = default)
     {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
         if (Status == AudioCaptureStatus.Capturing)
         {
             _logger.LogWarning("SystemAudioCaptureSource.StartAsync called while already capturing.");
@@ -86,6 +91,7 @@ public sealed class SystemAudioCaptureSource : IAudioCaptureSource, IDisposable
 
         _sessionId = sessionId;
         _paused    = false;
+        _stopping  = false;
 
         try
         {
@@ -160,7 +166,10 @@ public sealed class SystemAudioCaptureSource : IAudioCaptureSource, IDisposable
             Status = AudioCaptureStatus.DeviceError;
             _logger.LogError(
                 ex, "[SystemAudioSource.StartAsync] Failed to start loopback on device '{Device}'.", _deviceName);
-            DisposeCapture();
+            lock (_stateLock)
+            {
+                DisposeCaptureLocked();
+            }
             throw;
         }
 
@@ -169,20 +178,45 @@ public sealed class SystemAudioCaptureSource : IAudioCaptureSource, IDisposable
 
     public async Task StopAsync(CancellationToken ct = default)
     {
-        if (Status is AudioCaptureStatus.Idle or AudioCaptureStatus.NoDevice)
+        if (_disposed)
+        {
+            _logger.LogDebug("[SystemAudioSource.StopAsync] Stop requested after dispose — ignored.");
             return;
+        }
+
+        if (Status is AudioCaptureStatus.Idle or AudioCaptureStatus.NoDevice &&
+            _capture is null && _captureBuffer is null && _pcm16Provider is null)
+            return;
+
+        _stopping = true;
 
         _logger.LogInformation(
             "[SystemAudioSource.StopAsync] Stopping loopback capture. Device='{Device}' Status={Status}",
             _deviceName, Status);
-        _capture?.StopRecording();
+
+        try
+        {
+            _capture?.StopRecording();
+        }
+        catch (ObjectDisposedException)
+        {
+            _logger.LogDebug("[SystemAudioSource.StopAsync] Capture was already disposed during stop.");
+        }
 
         await Task.Delay(200, CancellationToken.None);
 
-        DrainConverter();
-        FlushBuffer(isFinal: true);
-        DisposeCapture();
-        Status = AudioCaptureStatus.Idle;
+        lock (_stateLock)
+        {
+            if (_disposed)
+                return;
+
+            DrainConverterLocked();
+            FlushBufferLocked(isFinal: true);
+            DisposeCaptureLocked();
+            Status = AudioCaptureStatus.Idle;
+        }
+
+        _stopping = false;
         _logger.LogInformation("[SystemAudioSource.StopAsync] Loopback capture stopped and disposed.");
     }
 
@@ -210,32 +244,37 @@ public sealed class SystemAudioCaptureSource : IAudioCaptureSource, IDisposable
 
     private void OnDataAvailable(object? sender, WaveInEventArgs e)
     {
-        if (_paused || e.BytesRecorded == 0) return;
-        if (_captureBuffer is null || _pcm16Provider is null) return;
+        if (_disposed || _stopping || _paused || e.BytesRecorded == 0) return;
 
         try
         {
-            // ── Native-buffer diagnostics ─────────────────────────────────────
-            var span    = e.Buffer.AsSpan(0, e.BytesRecorded);
-            var isFloat = _nativeFormat?.Encoding == NAudio.Wave.WaveFormatEncoding.IeeeFloat;
-            var nRms    = isFloat
-                ? AudioChunkDiagnostics.ComputeRmsFloat32(span)
-                : AudioChunkDiagnostics.ComputeRms(span);
-            var nPeak   = isFloat
-                ? AudioChunkDiagnostics.ComputePeakFloat32(span)
-                : AudioChunkDiagnostics.ComputePeak(span);
-            var (nMin, nMax, nZeros) = isFloat
-                ? AudioChunkDiagnostics.ComputeMinMaxZeroFloat32(span)
-                : AudioChunkDiagnostics.ComputeMinMaxZero(span);
-            _nativeRms = nRms;
+            lock (_stateLock)
+            {
+                if (_disposed || _stopping || _captureBuffer is null || _pcm16Provider is null)
+                    return;
 
-            _logger.LogDebug(
-                "[SysAudioNative] Device='{Dev}' Bytes={B} RMS={R:F4} Peak={P:F4} " +
-                "Min={Min:F4} Max={Max:F4} Zeros={Z:P0}",
-                _deviceName, e.BytesRecorded, nRms, nPeak, nMin, nMax, nZeros);
+                // ── Native-buffer diagnostics ─────────────────────────────────────
+                var span    = e.Buffer.AsSpan(0, e.BytesRecorded);
+                var isFloat = _nativeFormat?.Encoding == NAudio.Wave.WaveFormatEncoding.IeeeFloat;
+                var nRms    = isFloat
+                    ? AudioChunkDiagnostics.ComputeRmsFloat32(span)
+                    : AudioChunkDiagnostics.ComputeRms(span);
+                var nPeak   = isFloat
+                    ? AudioChunkDiagnostics.ComputePeakFloat32(span)
+                    : AudioChunkDiagnostics.ComputePeak(span);
+                var (nMin, nMax, nZeros) = isFloat
+                    ? AudioChunkDiagnostics.ComputeMinMaxZeroFloat32(span)
+                    : AudioChunkDiagnostics.ComputeMinMaxZero(span);
+                _nativeRms = nRms;
 
-            _captureBuffer.AddSamples(e.Buffer, 0, e.BytesRecorded);
-            DrainConverter();
+                _logger.LogDebug(
+                    "[SysAudioNative] Device='{Dev}' Bytes={B} RMS={R:F4} Peak={P:F4} " +
+                    "Min={Min:F4} Max={Max:F4} Zeros={Z:P0}",
+                    _deviceName, e.BytesRecorded, nRms, nPeak, nMin, nMax, nZeros);
+
+                _captureBuffer.AddSamples(e.Buffer, 0, e.BytesRecorded);
+                DrainConverterLocked();
+            }
         }
         catch (Exception ex)
         {
@@ -243,13 +282,16 @@ public sealed class SystemAudioCaptureSource : IAudioCaptureSource, IDisposable
         }
     }
 
-    private void DrainConverter()
+    private void DrainConverterLocked()
     {
-        if (_pcm16Provider is null) return;
+        if (_disposed || _pcm16Provider is null) return;
         var temp = new byte[DrainBlockBytes];
         int read;
         while ((read = _pcm16Provider.Read(temp, 0, temp.Length)) > 0)
         {
+            if (_disposed)
+                return;
+
             _pcmBuffer.Write(temp, 0, read);
             TryEmitChunk();
         }
@@ -277,6 +319,9 @@ public sealed class SystemAudioCaptureSource : IAudioCaptureSource, IDisposable
 
     private void TryEmitChunk()
     {
+        if (_disposed)
+            return;
+
         while (_pcmBuffer.Length >= _chunkBytes)
         {
             var raw       = _pcmBuffer.ToArray();
@@ -292,8 +337,11 @@ public sealed class SystemAudioCaptureSource : IAudioCaptureSource, IDisposable
         }
     }
 
-    private void FlushBuffer(bool isFinal)
+    private void FlushBufferLocked(bool isFinal)
     {
+        if (_disposed || !_pcmBuffer.CanRead)
+            return;
+
         if (_pcmBuffer.Length == 0) return;
         var raw         = _pcmBuffer.ToArray();
         var bytesPerSec = TargetSampleRate * TargetChannels * (TargetBitsPerSample / 8);
@@ -345,7 +393,7 @@ public sealed class SystemAudioCaptureSource : IAudioCaptureSource, IDisposable
 
     // ── Disposal ──────────────────────────────────────────────────────────────
 
-    private void DisposeCapture()
+    private void DisposeCaptureLocked()
     {
         // The managed chain providers are not IDisposable — just null the reference.
         _pcm16Provider = null;
@@ -362,13 +410,46 @@ public sealed class SystemAudioCaptureSource : IAudioCaptureSource, IDisposable
 
     public void Dispose()
     {
+        if (_disposed)
+        {
+            _logger.LogDebug("[SystemAudioSource.Dispose] Dispose() called more than once — ignored.");
+            return;
+        }
+
         _logger.LogInformation(
             "[SystemAudioSource.Dispose] Dispose() called. Status={Status} Device='{Device}'",
             Status, _deviceName ?? "(not set)");
-        FlushBuffer(isFinal: false);
-        DisposeCapture();
-        _pcmBuffer.Dispose();
-        _targetDevice?.Dispose();
+
+        MemoryStream? pcmBufferToDispose = null;
+        MMDevice? targetDeviceToDispose = null;
+
+        lock (_stateLock)
+        {
+            if (_disposed)
+                return;
+
+            _disposed = true;
+            _stopping = true;
+
+            try
+            {
+                FlushBufferLocked(isFinal: false);
+            }
+            catch (ObjectDisposedException)
+            {
+                // best-effort during teardown
+            }
+
+            DisposeCaptureLocked();
+            pcmBufferToDispose = _pcmBuffer;
+            _pcmBuffer = new MemoryStream();
+            targetDeviceToDispose = _targetDevice;
+            _targetDevice = null;
+            Status = AudioCaptureStatus.Idle;
+        }
+
+        pcmBufferToDispose?.Dispose();
+        targetDeviceToDispose?.Dispose();
         _logger.LogInformation("[SystemAudioSource.Dispose] Disposal complete.");
     }
 }

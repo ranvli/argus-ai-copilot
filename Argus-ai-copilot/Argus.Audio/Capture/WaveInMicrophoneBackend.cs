@@ -525,7 +525,7 @@ public sealed class WaveInMicrophoneBackend : IDisposable
         // Log pre/post whenever gain is active so the effect is always visible.
         if (DiagNormalize || DiagGain != 1f)
         {
-            _logger.LogInformation(
+            _logger.LogDebug(
                 "[WaveInGain] Device='{D}' PreRMS={PR:F4} PrePeak={PP:F4} → " +
                 "PostRMS={CR:F4} PostPeak={CP:F4}  Mode={Mode}",
                 DeviceName, preRms, prePeak, convRms, convPeak,

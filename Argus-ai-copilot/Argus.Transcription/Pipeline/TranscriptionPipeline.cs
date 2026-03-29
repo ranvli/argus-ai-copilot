@@ -7,6 +7,7 @@ using Argus.Audio.Diagnostics;
 using Argus.Core.Domain.Entities;
 using Argus.Core.Domain.Enums;
 using Argus.Core.Domain.ValueObjects;
+using Argus.Transcription.Text;
 using Argus.Transcription.Whisper;
 using Microsoft.Extensions.Logging;
 using NAudio.Wave;
@@ -29,6 +30,7 @@ namespace Argus.Transcription.Pipeline;
 /// </summary>
 public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDisposable
 {
+    private readonly SemaphoreSlim _disposeGate = new(1, 1);
     private readonly IModelResolver _modelResolver;
     private readonly ILogger<TranscriptionPipeline> _logger;
     private readonly WhisperModelService? _whisperModelService;
@@ -76,13 +78,19 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
     private string?                  _lastTranscriptionError;
     private AudioChunk?              _pendingMicChunk;
     private string?                  _lockedLanguage;
+    private string?                  _languageCandidate;
+    private int                      _languageCandidateHits;
+    private bool                     _disposing;
+    private bool                     _stopped;
+    private bool                     _disposed;
 
     private const float ChunkNormalizationTargetPeak = 0.45f;
-    private const float ChunkNormalizationMinPeak = 0.03f;
-    private const float ChunkNormalizationMinRms  = 0.004f;
+    private const float ChunkNormalizationMinPeak = 0.015f;
+    private const float ChunkNormalizationMinRms  = 0.002f;
     private const float ChunkNormalizationMaxGain = 6.0f;
-    private const float MicLowActivityPeakThreshold = 0.025f;
-    private const float MicLowActivityRmsThreshold  = 0.003f;
+    private const float MicLowActivityPeakThreshold = 0.018f;
+    private const float MicLowActivityRmsThreshold  = 0.002f;
+    private const int LanguageLockRequiredHits = 2;
     private static readonly TimeSpan MaxMergedMicDuration = TimeSpan.FromSeconds(5);
 
     // â”€â”€ ITranscriptionPipeline â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -134,6 +142,9 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
         _dbgFirstSilentSaved   = false;
         _pendingMicChunk       = null;
         _lockedLanguage        = null;
+        _languageCandidate     = null;
+        _languageCandidateHits = 0;
+        _stopped               = false;
 
         // â”€â”€ Probe transcription provider once at start time â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         // This is the critical check. We resolve now so:
@@ -210,6 +221,18 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
 
     public async Task StopAsync(CancellationToken ct = default)
     {
+        if (_disposed)
+        {
+            _logger.LogDebug("[Pipeline.StopAsync] Stop requested after dispose — ignored.");
+            return;
+        }
+
+        if (_stopped)
+        {
+            _logger.LogDebug("[Pipeline.StopAsync] Stop already completed. SessionId={Id}", _sessionId);
+            return;
+        }
+
         _logger.LogInformation("[Pipeline.StopAsync] Beginning stop. SessionId={Id}", _sessionId);
 
         if (_mic is not null)
@@ -246,6 +269,7 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
         _drainCts = null;
 
         _transcriptionModel = null;
+        _stopped = true;
 
         PublishStatus();
         _logger.LogInformation("[Pipeline.StopAsync] Stop complete. SessionId={Id} TotalSegments={Count}",
@@ -406,7 +430,7 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
             var whisperPcm = NormalizeChunkForWhisper(chunk.Data, out var appliedGain, out var outputRms, out var outputPeak);
             var whisperDuration = TimeSpan.FromSeconds((double)whisperPcm.Length / (16_000 * 2));
 
-            _logger.LogInformation(
+            _logger.LogDebug(
                 "[Pipeline.ChunkDiag] ChunkId={Id} Source={Source} Duration={Dur:F2}s " +
                 "Bytes={Bytes} SampleRate=16000 Channels=1 Format=PCM16 " +
                 "RMS={Rms:F4} Peak={Peak:F4} Signal=[{Signal}]",
@@ -431,7 +455,7 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
                     _debugAudioFolder,
                     $"{sourceName}_{idx:D4}_{DateTimeOffset.UtcNow:HHmmss}_{inputRms:F3}.wav");
                 WriteWav(debugFile, whisperPcm);
-                _logger.LogInformation(
+                _logger.LogDebug(
                     "[Pipeline.Debug] Saved first-silent debug WAV: {File}  (RMS={Rms:F4} Peak={Peak:F4})",
                     debugFile, inputRms, inputPeak);
             }
@@ -439,7 +463,7 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
             PublishStatus(transcriptionStatus: TranscriptionPipelineStatus.Transcribing);
             WriteWav(tempFile, whisperPcm);
 
-            _logger.LogInformation(
+            _logger.LogDebug(
                 "[ChunkGain] inputRms={InputRms:F4} inputPeak={InputPeak:F4} appliedGain={Gain:F2} outputRms={OutputRms:F4} outputPeak={OutputPeak:F4}",
                 inputRms,
                 inputPeak,
@@ -447,7 +471,7 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
                 outputRms,
                 outputPeak);
 
-            _logger.LogInformation(
+            _logger.LogDebug(
                 "[Pipeline.WhisperInput] ChunkId={Id} action=sent wavDuration={Duration:F2}s inputRms={InputRms:F4} inputPeak={InputPeak:F4} outputRms={OutputRms:F4} outputPeak={OutputPeak:F4}",
                 chunk.Id,
                 whisperDuration.TotalSeconds,
@@ -488,21 +512,12 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
             _lastTranscriptionAt    = DateTimeOffset.UtcNow;
 
             var detectedLanguage = SanitizeLanguage(response.DetectedLanguage);
-            if (_lockedLanguage is null && detectedLanguage is not null && IsValidTranscription(response.FullText))
-            {
-                _lockedLanguage = detectedLanguage;
-                _logger.LogInformation(
-                    "[LanguageLock] detected={Detected} locked={Locked}",
-                    detectedLanguage,
-                    _lockedLanguage);
-            }
-            else
-            {
-                _logger.LogInformation(
-                    "[LanguageLock] detected={Detected} locked={Locked}",
-                    detectedLanguage ?? "(none)",
-                    _lockedLanguage ?? "(none)");
-            }
+            var validSegments = TranscriptTextFilter.FilterMeaningfulSegments(response.Segments);
+            var effectiveText = TranscriptTextFilter.IsMeaningfulText(response.FullText)
+                ? response.FullText.Trim()
+                : string.Join(" ", validSegments.Select(segment => segment.Text.Trim()));
+
+            UpdateLanguageLock(detectedLanguage, effectiveText, inputRms, inputPeak);
 
             _logger.LogInformation(
                 "[Pipeline.TxResponse] Transcription complete. ChunkId={Id} Segments={SegCount} " +
@@ -515,7 +530,16 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
                     ? response.FullText[..100] + "â€¦"
                     : response.FullText);
 
-            if (response.Segments.Count == 0 && response.FullText.Length > 0)
+            if (!TranscriptTextFilter.IsMeaningfulText(response.FullText) && validSegments.Count == 0)
+            {
+                _logger.LogDebug(
+                    "[Pipeline.TxResponse] Dropping junk transcription. ChunkId={Id} Preview={Preview}",
+                    chunk.Id,
+                    response.FullText.Length > 100
+                        ? response.FullText[..100] + "â€¦"
+                        : response.FullText);
+            }
+            else if (validSegments.Count == 0 && TranscriptTextFilter.IsMeaningfulText(response.FullText))
             {
                 // Provider returned text but no segments â€” synthesise one segment.
                 _logger.LogDebug(
@@ -536,9 +560,9 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
                     _sessionId, synthetic.Text.Length > 80 ? synthetic.Text[..80] + "â€¦" : synthetic.Text);
                 SegmentsProduced?.Invoke(this, list);
             }
-            else if (response.Segments.Count > 0)
+            else if (validSegments.Count > 0)
             {
-                var anchored = StampSegments(response.Segments, chunk);
+                var anchored = StampSegments(validSegments, chunk);
                 _segmentCount += anchored.Count;
 
                 _logger.LogInformation(
@@ -590,44 +614,59 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
 
     private AudioChunk? StageMicrophoneChunk(AudioChunk chunk)
     {
-        var rms  = AudioChunkDiagnostics.ComputeRms(chunk.Data);
-        var peak = AudioChunkDiagnostics.ComputePeak(chunk.Data);
-        var lowActivity = rms < MicLowActivityRmsThreshold && peak < MicLowActivityPeakThreshold;
+        var metrics = AnalyzeSpeechActivity(chunk.Data);
+        var lowActivity = metrics.IsLowActivity;
 
         if (_pendingMicChunk is null)
         {
             if (!lowActivity)
             {
-                LogLatencyPolicy("send_immediately", chunk.Duration, rms, peak);
+                LogLatencyPolicy("send_immediately", chunk.Duration, metrics);
                 return chunk;
             }
 
             _pendingMicChunk = chunk;
-            LogLatencyPolicy("buffer_first_low_signal", chunk.Duration, rms, peak);
+            LogLatencyPolicy("buffer_first_low_signal", chunk.Duration, metrics);
             return null;
         }
 
         var merged = MergeChunks(_pendingMicChunk, chunk);
         _pendingMicChunk = null;
-
-        var mergedRms  = AudioChunkDiagnostics.ComputeRms(merged.Data);
-        var mergedPeak = AudioChunkDiagnostics.ComputePeak(merged.Data);
-        var mergedLowActivity = mergedRms < MicLowActivityRmsThreshold && mergedPeak < MicLowActivityPeakThreshold;
+        var mergedMetrics = AnalyzeSpeechActivity(merged.Data);
+        var mergedLowActivity = mergedMetrics.IsLowActivity;
 
         if (merged.Duration > MaxMergedMicDuration)
         {
-            LogLatencyPolicy("drop_low_signal_exceeded_max_duration", merged.Duration, mergedRms, mergedPeak);
+            LogLatencyPolicy("drop_low_signal_exceeded_max_duration", merged.Duration, mergedMetrics);
             return null;
         }
 
         if (mergedLowActivity)
         {
-            LogLatencyPolicy("drop_low_signal_after_single_merge", merged.Duration, mergedRms, mergedPeak);
+            LogLatencyPolicy("drop_low_signal_after_single_merge", merged.Duration, mergedMetrics);
             return null;
         }
 
-        LogLatencyPolicy(lowActivity ? "single_merge_and_send" : "merge_and_send", merged.Duration, mergedRms, mergedPeak);
+        LogLatencyPolicy(lowActivity ? "single_merge_and_send" : "merge_and_send", merged.Duration, mergedMetrics);
         return merged;
+    }
+
+    private static SpeechActivityMetrics AnalyzeSpeechActivity(byte[] data)
+    {
+        var rawRms = AudioChunkDiagnostics.ComputeRms(data);
+        var rawPeak = AudioChunkDiagnostics.ComputePeak(data);
+        _ = NormalizeChunkForWhisper(data, out var appliedGain, out var normalizedRms, out var normalizedPeak);
+
+        var rawSpeechLike = rawRms >= MicLowActivityRmsThreshold || rawPeak >= MicLowActivityPeakThreshold;
+        var normalizedSpeechLike = normalizedRms >= MicLowActivityRmsThreshold || normalizedPeak >= MicLowActivityPeakThreshold;
+
+        return new SpeechActivityMetrics(
+            rawRms,
+            rawPeak,
+            normalizedRms,
+            normalizedPeak,
+            appliedGain,
+            !(rawSpeechLike || normalizedSpeechLike));
     }
 
     private static AudioChunk MergeChunks(AudioChunk first, AudioChunk second)
@@ -685,14 +724,17 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
         return normalized;
     }
 
-    private void LogLatencyPolicy(string action, TimeSpan duration, float rms, float peak)
+    private void LogLatencyPolicy(string action, TimeSpan duration, SpeechActivityMetrics metrics)
     {
-        _logger.LogInformation(
-            "[LatencyPolicy] action={Action} duration={Duration:F2}s rms={Rms:F4} peak={Peak:F4}",
+        _logger.LogDebug(
+            "[LatencyPolicy] action={Action} duration={Duration:F2}s rawRms={RawRms:F4} rawPeak={RawPeak:F4} normalizedRms={NormalizedRms:F4} normalizedPeak={NormalizedPeak:F4} gain={Gain:F2}",
             action,
             duration.TotalSeconds,
-            rms,
-            peak);
+            metrics.RawRms,
+            metrics.RawPeak,
+            metrics.NormalizedRms,
+            metrics.NormalizedPeak,
+            metrics.AppliedGain);
     }
 
     private static string? SanitizeLanguage(string? detectedLanguage)
@@ -712,30 +754,85 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
 
     private static bool IsValidTranscription(string? text)
     {
-        if (string.IsNullOrWhiteSpace(text))
+        if (!TranscriptTextFilter.IsMeaningfulText(text))
             return false;
 
         var trimmed = text.Trim();
-        if (trimmed.Equals("[BLANK_AUDIO]", StringComparison.OrdinalIgnoreCase) ||
-            trimmed.Equals("(speaking in foreign language)", StringComparison.OrdinalIgnoreCase) ||
-            trimmed.Equals("[inaudible]", StringComparison.OrdinalIgnoreCase))
-        {
-            return false;
-        }
-
-        if (trimmed.Length < 4)
+        var tokens = trimmed.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (tokens.Length < 2)
             return false;
 
         var letters = trimmed.Count(char.IsLetter);
-        if (letters < 3)
-            return false;
-
-        var tokens = trimmed.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-        if (tokens.Length == 1 && trimmed.Length < 6)
+        if (letters < 6)
             return false;
 
         return true;
     }
+
+    private void UpdateLanguageLock(string? detectedLanguage, string? text, float inputRms, float inputPeak)
+    {
+        if (_lockedLanguage is not null)
+        {
+            _logger.LogInformation(
+                "[LanguageLock] detected={Detected} locked={Locked}",
+                detectedLanguage ?? "(none)",
+                _lockedLanguage);
+            return;
+        }
+
+        if (detectedLanguage is null || !IsValidTranscription(text) || IsClearlyDeadSignal(inputRms, inputPeak))
+        {
+            ResetLanguageCandidate();
+            _logger.LogInformation(
+                "[LanguageLock] detected={Detected} locked={Locked}",
+                detectedLanguage ?? "(none)",
+                _lockedLanguage ?? "(none)");
+            return;
+        }
+
+        if (!string.Equals(_languageCandidate, detectedLanguage, StringComparison.Ordinal))
+        {
+            _languageCandidate = detectedLanguage;
+            _languageCandidateHits = 1;
+        }
+        else
+        {
+            _languageCandidateHits++;
+        }
+
+        _logger.LogInformation(
+            "[LanguageCandidate] candidate={Candidate} hits={Hits}",
+            _languageCandidate,
+            _languageCandidateHits);
+
+        if (_languageCandidateHits >= LanguageLockRequiredHits)
+        {
+            _lockedLanguage = _languageCandidate;
+            ResetLanguageCandidate();
+        }
+
+        _logger.LogInformation(
+            "[LanguageLock] detected={Detected} locked={Locked}",
+            detectedLanguage,
+            _lockedLanguage ?? "(none)");
+    }
+
+    private void ResetLanguageCandidate()
+    {
+        _languageCandidate = null;
+        _languageCandidateHits = 0;
+    }
+
+    private static bool IsClearlyDeadSignal(float rms, float peak)
+        => peak < 0.0015f && rms < 0.0008f;
+
+    private readonly record struct SpeechActivityMetrics(
+        float RawRms,
+        float RawPeak,
+        float NormalizedRms,
+        float NormalizedPeak,
+        float AppliedGain,
+        bool IsLowActivity);
 
     private List<TranscriptSegment> StampSegments(IReadOnlyList<TranscriptSegment> raw, AudioChunk chunk)
     {
@@ -794,8 +891,42 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
 
     public async ValueTask DisposeAsync()
     {
-        await StopAsync();
-        _mic?.Dispose();
-        _sysAudio?.Dispose();
+        await _disposeGate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            if (_disposed || _disposing)
+                return;
+
+            _disposing = true;
+        }
+        finally
+        {
+            _disposeGate.Release();
+        }
+
+        try
+        {
+            if (!_stopped)
+                await StopAsync().ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "[Pipeline.DisposeAsync] StopAsync during dispose completed with a non-fatal exception.");
+        }
+        finally
+        {
+            await _disposeGate.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                _mic = null;
+                _sysAudio = null;
+                _disposed = true;
+                _disposing = false;
+            }
+            finally
+            {
+                _disposeGate.Release();
+            }
+        }
     }
 }

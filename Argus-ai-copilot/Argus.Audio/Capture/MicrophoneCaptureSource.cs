@@ -467,7 +467,7 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
                         sb.Append($"{s} ");
                     }
                 }
-                _logger.LogInformation(
+                _logger.LogDebug(
                     "[MicNative/WASAPI] First {N} samples (session start): [{Samples}]  " +
                     "Format={IsFloat} Bytes={Bytes} RMS={Rms:F4}",
                     sampleCount, sb.ToString().TrimEnd(),
@@ -481,20 +481,20 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
             {
                 _levelLogWindowActive = true;
                 _levelLogWindowEnd    = now.AddSeconds(5);
-                _logger.LogInformation(
+                _logger.LogDebug(
                     "[MicLevel/WASAPI] ─── Starting 5-second level-progression window ─────────────────────────────");
             }
             if (now <= _levelLogWindowEnd)
             {
                 _levelLogCallbackCount++;
-                _logger.LogInformation(
+                _logger.LogDebug(
                     "[MicLevel/WASAPI] cb={N,4}  RMS={Rms:F4}  Peak={Peak:F4}  Zeros={Zeros:P0}  Bytes={Bytes}",
                     _levelLogCallbackCount, nativeRms, nativePeak, nativeZeroRatio, e.BytesRecorded);
             }
             else if (_levelLogCallbackCount > 0)
             {
                 // Log once when the window closes
-                _logger.LogInformation(
+                _logger.LogDebug(
                     "[MicLevel/WASAPI] ─── 5-second level window closed after {N} callbacks ─────────────────────",
                     _levelLogCallbackCount);
                 _levelLogCallbackCount = 0;   // zero = window closed, suppresses further messages
@@ -834,7 +834,7 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
                         // Reset so next event gets a fresh window (cap resets on next OnDataAvailable)
                         _nativeDebugBuffer = new MemoryStream();
 
-                        _logger.LogInformation(
+                        _logger.LogDebug(
                             "[MicDebug] NativeSnap: {Bytes}B  {Frames} frames  {Dur:F3}s  " +
                             "@ {Rate}Hz/{Bits}bit/{Ch}ch",
                             nativeBytes, nativeFrames, nativeDurSec,
@@ -847,7 +847,7 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
                                 nativeDurSec, _chunkDuration.TotalSeconds, nativeBytes);
                     }
 
-                    _logger.LogInformation(
+                    _logger.LogDebug(
                         "[MicDebug] Saved debug WAV. Reason={Reason} CLASS={Class} " +
                         "NativeRMS={NR:F4} ConvRMS={CR:F4} ConvZeros={CZ:P0} " +
                         "Conv={ConvPath} Native={NativePath}",
@@ -978,30 +978,59 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
         if (_startupCallbackCount < StartupValidationCallbackCount)
             return;
 
-        var healthy = EvaluateStartupStreamHealth();
-        CompleteStartupValidation(healthy);
+        var (healthy, reason) = EvaluateStartupStreamHealth();
+        CompleteStartupValidation(healthy, reason);
     }
 
     private bool CompleteStartupValidationAfterTimeout()
     {
-        var healthy = EvaluateStartupStreamHealth();
-        CompleteStartupValidation(healthy);
+        var (healthy, reason) = EvaluateStartupStreamHealth();
+        CompleteStartupValidation(healthy, reason);
         return healthy;
     }
 
-    private bool EvaluateStartupStreamHealth()
-        => _startupCallbackCount > 0
-        && _startupBytesReceived > 0
-        && !_startupUnexpectedRecordingStopped
-        && _startupFailureException is null;
+    private (bool Healthy, string Reason) EvaluateStartupStreamHealth()
+    {
+        if (_startupCallbackCount <= 0)
+            return (false, "no_callbacks");
 
-    private void CompleteStartupValidation(bool healthy)
+        if (_startupBytesReceived <= 0)
+            return (false, "no_bytes_received");
+
+        if (_startupUnexpectedRecordingStopped)
+            return (false, "unexpected_recording_stop");
+
+        if (_startupFailureException is not null)
+            return (false, "startup_exception");
+
+        if (_startupDeadCallbackCount >= _startupCallbackCount)
+            return (false, "all_startup_callbacks_dead");
+
+        var avgRms  = _startupCallbackCount > 0 ? _startupCallbackRmsTotal / _startupCallbackCount : 0f;
+        var avgPeak = _startupCallbackCount > 0 ? _startupCallbackPeakTotal / _startupCallbackCount : 0f;
+        if (IsClearlyDeadChunk(avgRms, avgPeak))
+            return (false, "average_signal_effectively_zero");
+
+        var meaningfulSignalCallbacks = _startupCallbackCount - _startupDeadCallbackCount;
+        if (meaningfulSignalCallbacks <= 0)
+            return (false, "no_meaningful_signal_callback");
+
+        return (true, "meaningful_signal_observed");
+    }
+
+    private void CompleteStartupValidation(bool healthy, string reason)
     {
         var avgRms  = _startupCallbackCount > 0 ? _startupCallbackRmsTotal / _startupCallbackCount : 0f;
         var avgPeak = _startupCallbackCount > 0 ? _startupCallbackPeakTotal / _startupCallbackCount : 0f;
 
         if (healthy)
             ReleaseStartupValidationGate();
+
+        _logger.LogInformation(
+            "[MicStartupValidationDecision] backend={Backend} healthy={Healthy} reason={Reason}",
+            BackendName(ActiveBackend),
+            healthy,
+            reason);
 
         _logger.LogInformation(
             "[MicStartupValidation] backend={Backend} callbacks={Callbacks} bytes={Bytes} avgRms={AvgRms:F4} avgPeak={AvgPeak:F4} deadCallbacks={DeadCallbacks} healthy={Healthy} stoppedUnexpectedly={StoppedUnexpectedly} failure={Failure}",
@@ -1308,7 +1337,7 @@ public sealed class MicrophoneCaptureSource : IAudioCaptureSource, IDisposable
         if (callbackNumber > 5)
             return;
 
-        _logger.LogInformation(
+        _logger.LogDebug(
             "[MicCallbackBoundary] backend={Backend} cb={Callback} phase={Phase} nativeRms={NativeRms:F4} nativePeak={NativePeak:F4} bytesRecorded={BytesRecorded} bytesHanded={BytesHanded} bytesRead={BytesRead} chunkBufferBytes={ChunkBufferBytes}",
             backend,
             callbackNumber,

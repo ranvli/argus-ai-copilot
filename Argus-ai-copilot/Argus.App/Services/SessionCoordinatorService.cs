@@ -8,6 +8,7 @@ using Argus.Core.Domain.Enums;
 using Argus.Infrastructure.Storage;
 using Argus.Transcription.Intent;
 using Argus.Transcription.Pipeline;
+using Argus.Transcription.Text;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -588,19 +589,26 @@ internal sealed class SessionCoordinatorService
     {
         if (_activeSession is null) return;
 
-        _transcriptSegmentCount += segments.Count;
+        var meaningfulSegments = TranscriptTextFilter.FilterMeaningfulSegments(segments);
+        if (meaningfulSegments.Count == 0)
+        {
+            _logger.LogDebug("[UIBridge] Dropping junk-only transcript batch before UI/buffer publishing.");
+            return;
+        }
+
+        _transcriptSegmentCount += meaningfulSegments.Count;
 
         _logger.LogInformation(
             "[UIBridge] Re-raising transcript segments to UI. Count={Count} First='{First}'",
-            segments.Count,
-            segments.Count > 0
-                ? (segments[0].Text.Length > 120 ? segments[0].Text[..120] + "…" : segments[0].Text)
+            meaningfulSegments.Count,
+            meaningfulSegments.Count > 0
+                ? (meaningfulSegments[0].Text.Length > 120 ? meaningfulSegments[0].Text[..120] + "…" : meaningfulSegments[0].Text)
                 : string.Empty);
 
         // Push to rolling buffer and check for intent
-        _transcriptBuffer.Push(segments);
+        _transcriptBuffer.Push(meaningfulSegments);
         var recentText = _transcriptBuffer.GetRecentText(10);
-        var intent     = _intentDetector.Detect(segments);
+        var intent     = _intentDetector.Detect(meaningfulSegments);
         if (intent.HasIntent)
         {
             var enrichedContext = recentText;
@@ -614,10 +622,10 @@ internal sealed class SessionCoordinatorService
         }
 
         // Persist each segment and publish to UI via snapshot update
-        _ = PersistSegmentsAsync(segments);
+        _ = PersistSegmentsAsync(meaningfulSegments);
 
         // Notify the UI with the latest segment texts
-        TranscriptSegmentsReceived?.Invoke(this, segments);
+        TranscriptSegmentsReceived?.Invoke(this, meaningfulSegments);
 
         PublishSnapshot();
     }
