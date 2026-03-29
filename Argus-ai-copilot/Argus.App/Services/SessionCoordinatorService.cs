@@ -600,7 +600,7 @@ internal sealed class SessionCoordinatorService
         // Push to rolling buffer and check for intent
         _transcriptBuffer.Push(segments);
         var recentText = _transcriptBuffer.GetRecentText(10);
-        var intent     = _intentDetector.Detect(recentText);
+        var intent     = _intentDetector.Detect(segments);
         if (intent.HasIntent)
         {
             var enrichedContext = recentText;

@@ -45,6 +45,11 @@ internal sealed class OllamaChatModel : ProviderBase, IChatModel
 
             return new ChatResponse { Content = content, ModelUsed = ModelId };
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            _logger.LogDebug("OllamaChatModel.CompleteAsync cancelled by caller");
+            throw;
+        }
         catch (Exception ex)
         {
             _logger.LogError(ex, "OllamaChatModel.CompleteAsync failed");

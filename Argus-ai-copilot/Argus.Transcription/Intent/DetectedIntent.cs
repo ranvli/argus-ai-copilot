@@ -29,17 +29,23 @@ public enum DetectedIntent
 public sealed class IntentDetectionResult
 {
     public static readonly IntentDetectionResult None =
-        new(DetectedIntent.None, string.Empty, string.Empty);
+        new(DetectedIntent.None, string.Empty, string.Empty, string.Empty);
 
     public DetectedIntent Intent       { get; }
     public string         WakePhrase   { get; }
     public string         ContextText  { get; }
+    public string         TriggerText  { get; }
     public bool           HasIntent    => Intent != DetectedIntent.None;
 
-    public IntentDetectionResult(DetectedIntent intent, string wakePhrase, string contextText)
+    public IntentDetectionResult(
+        DetectedIntent intent,
+        string wakePhrase,
+        string contextText,
+        string triggerText)
     {
         Intent      = intent;
         WakePhrase  = wakePhrase;
         ContextText = contextText;
+        TriggerText = triggerText;
     }
 }

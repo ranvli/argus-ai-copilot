@@ -59,7 +59,7 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
     private string _transcriptionProvider = string.Empty;
     private string _transcriptionModelId  = string.Empty;
 
-    // Bounded channel: at most 20 queued chunks (~100 s of audio at 5 s chunks).
+    // Bounded channel: at most 20 queued chunks (~40 s of audio at 2 s chunks).
     private readonly Channel<AudioChunk> _chunkChannel =
         Channel.CreateBounded<AudioChunk>(new BoundedChannelOptions(20)
         {
@@ -701,7 +701,13 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
             return null;
 
         var trimmed = detectedLanguage.Trim().ToLowerInvariant();
-        return trimmed.Length is >= 2 and <= 10 ? trimmed : null;
+        return trimmed switch
+        {
+            "spanish" or "espanol" or "español" => "es",
+            "english" => "en",
+            _ when trimmed.Length is >= 2 and <= 10 => trimmed,
+            _ => null
+        };
     }
 
     private static bool IsValidTranscription(string? text)

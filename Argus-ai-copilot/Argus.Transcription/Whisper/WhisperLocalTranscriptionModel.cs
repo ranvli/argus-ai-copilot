@@ -21,6 +21,44 @@ namespace Argus.Transcription.Whisper;
 /// </summary>
 internal sealed class WhisperLocalTranscriptionModel : ITranscriptionModel
 {
+    private static readonly string[] SpanishTextHints =
+    [
+        " hola ",
+        " gracias ",
+        " por favor ",
+        " que ",
+        " qué ",
+        " como ",
+        " cómo ",
+        " por que ",
+        " por qué ",
+        " donde ",
+        " dónde ",
+        " cuando ",
+        " cuándo ",
+        " respondo ",
+        " respuesta ",
+        " hago ",
+        " debo ",
+        " puedo "
+    ];
+
+    private static readonly string[] EnglishTextHints =
+    [
+        " hello ",
+        " thanks ",
+        " please ",
+        " what ",
+        " why ",
+        " how ",
+        " when ",
+        " where ",
+        " who ",
+        " should ",
+        " respond ",
+        " reply "
+    ];
+
     private readonly ProviderProfile _profile;
     private readonly WhisperModelService _modelService;
     private readonly ILogger<WhisperLocalTranscriptionModel> _logger;
@@ -86,6 +124,13 @@ internal sealed class WhisperLocalTranscriptionModel : ITranscriptionModel
                 if (string.IsNullOrEmpty(text))
                     continue;
 
+                var segmentLanguage = NormalizeLanguage(seg.Language);
+
+                _logger.LogInformation(
+                    "[WhisperLocal.Language] segmentLanguage={Lang} text={Preview}",
+                    segmentLanguage ?? "(none)",
+                    Preview(text));
+
                 textBuilder.Append(text).Append(' ');
 
                 var now      = DateTimeOffset.UtcNow;
@@ -98,11 +143,18 @@ internal sealed class WhisperLocalTranscriptionModel : ITranscriptionModel
                     Text        = text,
                     SpeakerType = SpeakerType.Unknown,
                     Range       = new TimeRange(startOff, endOff),
-                    Language    = seg.Language
+                    Language    = segmentLanguage
                 });
             }
 
             var fullText = textBuilder.ToString().Trim();
+            var detectedLanguage = ResolveDetectedLanguage(segments, fullText, request.Language);
+
+            if (detectedLanguage is not null)
+            {
+                foreach (var segment in segments.Where(static s => string.IsNullOrWhiteSpace(s.Language)))
+                    segment.Language = detectedLanguage;
+            }
 
             _logger.LogInformation(
                 "[WhisperLocal] Transcription complete. ModelId={ModelId} Segments={Count} TextLength={Len}",
@@ -110,9 +162,10 @@ internal sealed class WhisperLocalTranscriptionModel : ITranscriptionModel
 
             return new TranscriptionResponse
             {
-                FullText  = fullText,
-                Segments  = segments.AsReadOnly(),
-                ModelUsed = _profile.ModelId
+                FullText         = fullText,
+                Segments         = segments.AsReadOnly(),
+                ModelUsed        = _profile.ModelId,
+                DetectedLanguage = detectedLanguage
             };
         }
         catch (OperationCanceledException)
@@ -126,4 +179,86 @@ internal sealed class WhisperLocalTranscriptionModel : ITranscriptionModel
             return TranscriptionResponse.Error($"Whisper transcription error: {ex.Message}");
         }
     }
+
+    private string? ResolveDetectedLanguage(
+        IReadOnlyList<TranscriptSegment> segments,
+        string fullText,
+        string? requestedLanguage)
+    {
+        var segmentLanguage = segments
+            .Select(static segment => NormalizeLanguage(segment.Language))
+            .FirstOrDefault(static language => language is not null);
+
+        if (segmentLanguage is not null)
+        {
+            _logger.LogInformation(
+                "[WhisperLocal.Language] detectedLanguage={Lang} source=segment",
+                segmentLanguage);
+            return segmentLanguage;
+        }
+
+        var inferredLanguage = InferLanguageFromText(fullText);
+        if (inferredLanguage is not null)
+        {
+            _logger.LogInformation(
+                "[WhisperLocal.Language] detectedLanguage={Lang} source=text_heuristic text={Preview}",
+                inferredLanguage,
+                Preview(fullText));
+            return inferredLanguage;
+        }
+
+        var requestLanguage = NormalizeLanguage(requestedLanguage);
+        if (requestLanguage is not null)
+        {
+            _logger.LogInformation(
+                "[WhisperLocal.Language] detectedLanguage={Lang} source=request_hint",
+                requestLanguage);
+            return requestLanguage;
+        }
+
+        _logger.LogInformation("[WhisperLocal.Language] detectedLanguage=(none) source=unavailable");
+        return null;
+    }
+
+    private static string? NormalizeLanguage(string? language)
+    {
+        if (string.IsNullOrWhiteSpace(language))
+            return null;
+
+        var trimmed = language.Trim().ToLowerInvariant();
+        return trimmed switch
+        {
+            "spanish" or "espanol" or "español" => "es",
+            "english" => "en",
+            _ when trimmed.Length is >= 2 and <= 10 => trimmed,
+            _ => null
+        };
+    }
+
+    private static string? InferLanguageFromText(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return null;
+
+        var padded = $" {text.Trim().ToLowerInvariant()} ";
+        var spanishScore = CountMatches(padded, SpanishTextHints);
+        var englishScore = CountMatches(padded, EnglishTextHints);
+
+        if (padded.IndexOfAny(['¿', '¡', 'á', 'é', 'í', 'ó', 'ú', 'ñ']) >= 0)
+            spanishScore += 2;
+
+        if (spanishScore >= 2 && spanishScore >= englishScore + 1)
+            return "es";
+
+        if (englishScore >= 2 && englishScore >= spanishScore + 1)
+            return "en";
+
+        return null;
+    }
+
+    private static int CountMatches(string text, IEnumerable<string> hints)
+        => hints.Count(hint => text.Contains(hint, StringComparison.Ordinal));
+
+    private static string Preview(string text)
+        => text.Length <= 100 ? text : text[..100] + "…";
 }

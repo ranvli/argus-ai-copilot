@@ -25,6 +25,7 @@ public sealed class AssistantReactionService : IAssistantReactionPublisher, IAsy
     private string _lastQuestionFingerprint = string.Empty;
     private static readonly TimeSpan QuestionCooldown = TimeSpan.FromSeconds(12);
     private static readonly Regex CollapseSpaces = new(@"\s+", RegexOptions.Compiled);
+    private static readonly Regex StripQuestionFingerprintNoise = new(@"[^\p{L}\p{N}\s]", RegexOptions.Compiled);
 
     public AssistantReactionSnapshot Current { get; private set; } =
         AssistantReactionSnapshot.Empty;
@@ -49,7 +50,7 @@ public sealed class AssistantReactionService : IAssistantReactionPublisher, IAsy
 
         if (result.Intent == DetectedIntent.QuestionForAssistant)
         {
-            var fingerprint = BuildQuestionFingerprint(result.ContextText);
+            var fingerprint = BuildQuestionFingerprint(result.TriggerText);
             var now = DateTimeOffset.UtcNow;
             if (fingerprint.Length > 0 &&
                 string.Equals(fingerprint, _lastQuestionFingerprint, StringComparison.Ordinal) &&
@@ -66,10 +67,13 @@ public sealed class AssistantReactionService : IAssistantReactionPublisher, IAsy
         }
 
         // Cancel any in-flight request and start a new one
-        var prev = Interlocked.Exchange(ref _currentCts, new CancellationTokenSource());
+        var nextCts = new CancellationTokenSource();
+        var prev = Interlocked.Exchange(ref _currentCts, nextCts);
+        if (prev is not null)
+            _logger.LogDebug("[Assistant] Cancelling in-flight reaction because a newer intent arrived.");
         try { prev?.Cancel(); prev?.Dispose(); } catch { /* best-effort */ }
 
-        var ct = _currentCts.Token;
+        var ct = nextCts.Token;
         _ = Task.Run(() => ReactAsync(result, recentTranscriptText, ct), ct);
     }
 
@@ -146,6 +150,12 @@ public sealed class AssistantReactionService : IAssistantReactionPublisher, IAsy
 
             if (response.IsError)
             {
+                if (IsExpectedCancellation(response.ErrorMessage, ct))
+                {
+                    _logger.LogDebug("[Assistant] Reaction cancelled by provider response (superseded request).");
+                    return;
+                }
+
                 _logger.LogError(
                     "[Assistant] Chat provider returned error. Detail: {Msg}", response.ErrorMessage);
                 Publish(new AssistantReactionSnapshot
@@ -251,8 +261,23 @@ public sealed class AssistantReactionService : IAssistantReactionPublisher, IAsy
             return string.Empty;
 
         var lowered = text.ToLowerInvariant();
-        var collapsed = CollapseSpaces.Replace(lowered, " ").Trim();
+        var stripped = StripQuestionFingerprintNoise.Replace(lowered, " ");
+        var collapsed = CollapseSpaces.Replace(stripped, " ").Trim();
         return collapsed.Length <= 160 ? collapsed : collapsed[..160];
+    }
+
+    private static bool IsExpectedCancellation(string? message, CancellationToken ct)
+    {
+        if (ct.IsCancellationRequested)
+            return true;
+
+        if (string.IsNullOrWhiteSpace(message))
+            return false;
+
+        return message.Contains("operation was canceled", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("operation was cancelled", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("task was canceled", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("task was cancelled", StringComparison.OrdinalIgnoreCase);
     }
 
     public async ValueTask DisposeAsync()

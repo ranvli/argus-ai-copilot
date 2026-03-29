@@ -1,3 +1,4 @@
+using Argus.Core.Domain.Entities;
 using Microsoft.Extensions.Logging;
 using System.Globalization;
 using System.Text;
@@ -20,6 +21,8 @@ namespace Argus.Transcription.Intent;
 /// </summary>
 public sealed class IntentDetectionService
 {
+    private sealed record QuestionMatch(string Detected, string TriggerText);
+
     private readonly ILogger<IntentDetectionService> _logger;
 
     // ── Wake / address phrases ────────────────────────────────────────────────
@@ -62,10 +65,14 @@ public sealed class IntentDetectionService
     [
         "argus que le respondo",
         "argus qué le respondo",
+        "argus que hago",
+        "argus qué hago",
         "que hago ahora",
         "qué hago ahora",
         "que le respondo",
         "qué le respondo",
+        "que le respondo ahora",
+        "qué le respondo ahora",
         "que digo",
         "qué digo",
         "que hago",
@@ -74,34 +81,21 @@ public sealed class IntentDetectionService
         "qué respondo",
         "como respondo",
         "cómo respondo",
-        "por que",
-        "por qué",
-        "cuando",
-        "cuándo",
-        "donde",
-        "dónde",
-        "cual",
-        "cuál",
-        "deberia",
-        "debería",
-        "puedo",
         "me recomiendas",
+        "que deberia hacer",
+        "qué debería hacer",
+        "por que pasa",
+        "por qué pasa",
         "what should i say",
         "what should i do",
+        "what do i do",
         "what do i say",
         "how should i respond",
         "how do i respond",
         "can you help me",
-        "could i",
-        "should i",
-        "can i",
-        "do i",
-        "what",
-        "why",
-        "how",
-        "when",
-        "where",
-        "who",
+        "could you help me",
+        "should i respond",
+        "can i respond",
     ];
 
     // Strip punctuation but keep spaces and alphanumeric (including accented chars)
@@ -111,59 +105,76 @@ public sealed class IntentDetectionService
     private static readonly Regex CollapseSpaces =
         new(@"\s+", RegexOptions.Compiled);
 
+    private static readonly Regex SentencePattern =
+        new(@"[^.!?\r\n]+(?:[.!?]|$)", RegexOptions.Compiled);
+
+    private static readonly Regex EnglishQuestionPattern =
+        new(@"\b(what|why|how|when|where|who)\s+(should|do|did|can|could|would|is|are|am|will|to|i|we|you)\b", RegexOptions.Compiled);
+
+    private static readonly Regex SpanishQuestionPattern =
+        new(@"\b(que|como|cuando|donde|cual|por que)\s+(debo|deberia|puedo|hago|haria|digo|respondo|le|me|pasa|significa|seria|responder|decir)\b", RegexOptions.Compiled);
+
     public IntentDetectionService(ILogger<IntentDetectionService> logger)
     {
         _logger = logger;
     }
 
     /// <summary>
-    /// Checks <paramref name="recentText"/> for wake phrases and help patterns.
+    /// Checks the newest transcript segment(s) for wake phrases and help patterns.
     /// Returns <see cref="IntentDetectionResult.None"/> if nothing actionable is found.
     /// </summary>
-    public IntentDetectionResult Detect(string recentText)
+    public IntentDetectionResult Detect(IReadOnlyList<TranscriptSegment> recentSegments)
     {
-        if (string.IsNullOrWhiteSpace(recentText))
+        var candidates = BuildCandidates(recentSegments);
+        if (candidates.Count == 0)
             return IntentDetectionResult.None;
 
-        var normalised = Normalise(recentText);
-        var folded = FoldText(normalised);
-        if (IsTooShortOrNoisy(folded))
-            return IntentDetectionResult.None;
-
-        var questionMatch = FindQuestionPhrase(recentText, normalised, folded);
-        if (questionMatch is not null)
+        foreach (var candidate in candidates)
         {
-            _logger.LogInformation(
-                "[QuestionIntent] detected={Detected} text={Preview}",
-                questionMatch,
-                Truncate(recentText, 120));
+            var normalised = Normalise(candidate);
+            var folded = FoldText(normalised);
+            if (IsTooShortOrNoisy(folded))
+                continue;
 
-            return new IntentDetectionResult(DetectedIntent.QuestionForAssistant, questionMatch, recentText);
-        }
-
-        // 1. Check for help/advice phrases first (more specific → higher priority)
-        foreach (var (phrase, intent) in HelpPhrases)
-        {
-            if (ContainsPhrase(normalised, phrase))
+            var questionMatch = FindQuestionPhrase(candidate, normalised, folded);
+            if (questionMatch is not null)
             {
                 _logger.LogInformation(
-                    "[Intent] Help phrase detected. Phrase='{Phrase}' Intent={Intent} Text='{Text}'",
-                    phrase, intent, Truncate(recentText, 120));
+                    "[QuestionIntent] detected={Detected} text={Preview}",
+                    questionMatch.Detected,
+                    Truncate(questionMatch.TriggerText, 120));
 
-                return new IntentDetectionResult(intent, phrase, recentText);
+                return new IntentDetectionResult(
+                    DetectedIntent.QuestionForAssistant,
+                    questionMatch.Detected,
+                    candidate,
+                    questionMatch.TriggerText);
             }
-        }
 
-        // 2. Check for wake / address phrases
-        foreach (var wake in WakePhrases)
-        {
-            if (ContainsPhrase(normalised, wake))
+            // 1. Check for help/advice phrases first (more specific → higher priority)
+            foreach (var (phrase, intent) in HelpPhrases)
             {
-                _logger.LogInformation(
-                    "[Intent] Wake phrase detected. Phrase='{Phrase}' Text='{Text}'",
-                    wake, Truncate(recentText, 120));
+                if (ContainsPhrase(normalised, phrase))
+                {
+                    _logger.LogInformation(
+                        "[Intent] Help phrase detected. Phrase='{Phrase}' Intent={Intent} Text='{Text}'",
+                        phrase, intent, Truncate(candidate, 120));
 
-                return new IntentDetectionResult(DetectedIntent.WakeWord, wake, recentText);
+                    return new IntentDetectionResult(intent, phrase, candidate, candidate);
+                }
+            }
+
+            // 2. Check for wake / address phrases
+            foreach (var wake in WakePhrases)
+            {
+                if (ContainsPhrase(normalised, wake))
+                {
+                    _logger.LogInformation(
+                        "[Intent] Wake phrase detected. Phrase='{Phrase}' Text='{Text}'",
+                        wake, Truncate(candidate, 120));
+
+                    return new IntentDetectionResult(DetectedIntent.WakeWord, wake, candidate, candidate);
+                }
             }
         }
 
@@ -216,21 +227,98 @@ public sealed class IntentDetectionService
     private static string Truncate(string s, int max) =>
         s.Length <= max ? s : s[..max] + "…";
 
-    private static string? FindQuestionPhrase(string originalText, string normalised, string folded)
+    private static IReadOnlyList<string> BuildCandidates(IReadOnlyList<TranscriptSegment> recentSegments)
     {
-        var hasQuestionPunctuation = originalText.Contains('?') || originalText.Contains('¿');
+        if (recentSegments.Count == 0)
+            return [];
+
+        var texts = recentSegments
+            .Select(segment => segment.Text?.Trim())
+            .Where(static text => !string.IsNullOrWhiteSpace(text))
+            .TakeLast(2)
+            .Cast<string>()
+            .ToList();
+
+        if (texts.Count == 0)
+            return [];
+
+        var candidates = new List<string>(3) { texts[^1] };
+
+        if (texts.Count > 1)
+        {
+            candidates.Add(string.Join(" ", texts));
+            candidates.Add(texts[^2]);
+        }
+
+        return candidates;
+    }
+
+    private static QuestionMatch? FindQuestionPhrase(string originalText, string normalised, string folded)
+    {
+        var punctuatedSentence = FindMatchingSentence(
+            originalText,
+            static sentence => (sentence.Contains('?') || sentence.Contains('¿')) &&
+                               !IsTooShortOrNoisy(FoldText(Normalise(sentence))));
+
+        if (punctuatedSentence is not null)
+            return new QuestionMatch("question_punctuation", punctuatedSentence);
 
         foreach (var phrase in QuestionPhrases)
         {
-            var foldedPhrase = FoldText(phrase);
+            var foldedPhrase = FoldText(Normalise(phrase));
             if (ContainsPhrase(folded, foldedPhrase))
-                return phrase;
+            {
+                var triggerText = FindMatchingSentence(
+                    originalText,
+                    sentence => ContainsPhrase(FoldText(Normalise(sentence)), foldedPhrase))
+                    ?? CollapseWhitespace(originalText);
+
+                return new QuestionMatch(phrase, triggerText);
+            }
         }
 
-        return hasQuestionPunctuation && folded.Length >= 8 && ContainsAnyLetter(folded)
-            ? "question_punctuation"
+        if (EnglishQuestionPattern.IsMatch(folded))
+        {
+            var triggerText = FindMatchingSentence(
+                originalText,
+                sentence => EnglishQuestionPattern.IsMatch(FoldText(Normalise(sentence))))
+                ?? CollapseWhitespace(originalText);
+
+            return new QuestionMatch("english_interrogative_pattern", triggerText);
+        }
+
+        if (SpanishQuestionPattern.IsMatch(folded))
+        {
+            var triggerText = FindMatchingSentence(
+                originalText,
+                sentence => SpanishQuestionPattern.IsMatch(FoldText(Normalise(sentence))))
+                ?? CollapseWhitespace(originalText);
+
+            return new QuestionMatch("spanish_interrogative_pattern", triggerText);
+        }
+
+        return null;
+    }
+
+    private static string? FindMatchingSentence(string originalText, Func<string, bool> predicate)
+    {
+        var matches = SentencePattern.Matches(originalText);
+
+        for (var index = matches.Count - 1; index >= 0; index--)
+        {
+            var sentence = CollapseWhitespace(matches[index].Value.Trim());
+            if (sentence.Length > 0 && predicate(sentence))
+                return sentence;
+        }
+
+        var collapsed = CollapseWhitespace(originalText);
+        return collapsed.Length > 0 && predicate(collapsed)
+            ? collapsed
             : null;
     }
+
+    private static string CollapseWhitespace(string text)
+        => CollapseSpaces.Replace(text, " ").Trim();
 
     private static bool IsTooShortOrNoisy(string text)
     {
