@@ -574,7 +574,26 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
                 return;
             }
 
-            UpdateLanguageLock(detectedLanguage, effectiveText, validSegments, inputRms, inputPeak, chunk.Id);
+            if (languageMode == "forced")
+            {
+                ResetLanguageCandidate();
+                _logger.LogInformation(
+                    "[LanguageDecision] action=reset reason={Reason} chunkId={ChunkId} detected={Detected} textValid={TextValid} rms={Rms:F4} peak={Peak:F4}",
+                    "forced_language_active",
+                    chunk.Id,
+                    detectedLanguage ?? "(none)",
+                    IsValidTranscription(effectiveText),
+                    inputRms,
+                    inputPeak);
+                _logger.LogInformation(
+                    "[LanguageLock] detected={Detected} locked={Locked}",
+                    detectedLanguage ?? "(none)",
+                    _lockedLanguage ?? "(none)");
+            }
+            else
+            {
+                UpdateLanguageLock(detectedLanguage, effectiveText, validSegments, inputRms, inputPeak, chunk.Id);
+            }
 
             _logger.LogInformation(
                 "[Pipeline.TxResponse] Transcription complete. ChunkId={Id} Segments={SegCount} " +
