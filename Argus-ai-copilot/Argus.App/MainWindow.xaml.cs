@@ -279,10 +279,8 @@ public partial class MainWindow : Window
         {
             TranscriptionNotConfiguredBanner.Visibility  = Visibility.Visible;
             TranscriptionNotConfiguredText.Text =
-                "? No transcription provider is configured. Audio is being captured but will not be transcribed.\n" +
-                "WhisperNetLocal (fully local, no API key) should be enabled by default. " +
-                "Check that ArgusAI:Profiles contains a WhisperNetLocal profile with \"Enabled\": true " +
-                "and that ArgusAI:Defaults:Transcription is set to \"WhisperNetLocal\" in appsettings.json.";
+                "? No active transcription provider is configured. Audio capture can continue, but no transcription will be produced.\n" +
+                "Check ArgusAI:Defaults:Transcription and ArgusAI:WorkflowMappings in appsettings.json.";
         }
         else if (!string.IsNullOrWhiteSpace(audio.TranscriptionError) &&
                  string.Equals(audio.TranscriptionProvider, "SherpaOnnx", StringComparison.OrdinalIgnoreCase))

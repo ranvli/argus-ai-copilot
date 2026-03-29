@@ -5,6 +5,8 @@ namespace Argus.Transcription.SherpaOnnx;
 
 internal static class SherpaOnnxConfigParser
 {
+    private const string ExpectedLayoutHint = "Place a sherpa profile folder containing profile.json, tokens.txt, VAD/LID/diarization models, and routed ASR model files under the configured SherpaModelsRoot or %LocalAppData%\\ArgusAI\\models\\sherpa-onnx\\<ModelId>.";
+
     public static SherpaOnnxAssetValidationResult ValidateAssets(ProviderProfile profile, string profileRoot)
     {
         var profileJsonPath = Path.Combine(profileRoot, "profile.json");
@@ -19,7 +21,8 @@ internal static class SherpaOnnxConfigParser
                 ProfileJsonPath = profileJsonPath,
                 ProfileJsonExists = false,
                 Reason = "profile_json_missing",
-                MissingFiles = [profileJsonPath]
+                MissingFiles = [profileJsonPath],
+                ExpectedLayoutHint = ExpectedLayoutHint
             };
         }
 
@@ -75,7 +78,8 @@ internal static class SherpaOnnxConfigParser
             ProfileJsonPath = profileJsonPath,
             ProfileJsonExists = true,
             Reason = missing.Count == 0 ? "ok" : "referenced_assets_missing",
-            MissingFiles = missing
+            MissingFiles = missing,
+            ExpectedLayoutHint = ExpectedLayoutHint
         };
     }
 

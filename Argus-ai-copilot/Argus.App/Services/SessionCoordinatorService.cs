@@ -405,6 +405,8 @@ internal sealed class SessionCoordinatorService
     private async Task StartPipelineAsync(Guid sessionId)
     {
         _logger.LogInformation("[Pipeline.Start] Acquiring pipeline scope for SessionId={Id}", sessionId);
+        var discoveredMicDevice = default(Argus.Audio.Devices.AudioDeviceInfo);
+        var discoveredOutputDevice = default(Argus.Audio.Devices.AudioDeviceInfo);
 
         try
         {
@@ -416,6 +418,8 @@ internal sealed class SessionCoordinatorService
             // ── Device discovery ────────────────────────────────────────────
             var micDevice    = _deviceDiscovery.GetDefaultInputDevice();
             var outputDevice = _deviceDiscovery.GetDefaultOutputDevice();
+            discoveredMicDevice = micDevice;
+            discoveredOutputDevice = outputDevice;
 
             if (micDevice is null)
             {
@@ -521,8 +525,10 @@ internal sealed class SessionCoordinatorService
             _logger.LogError(ex, "[Pipeline.Start] Failed to start transcription pipeline — session continues without audio.");
             _audioStatus = new AudioStatusSnapshot
             {
-                MicrophoneStatus = AudioCaptureStatus.DeviceError,
-                SystemAudioStatus = AudioCaptureStatus.NoDevice,
+                MicrophoneStatus = discoveredMicDevice is null ? AudioCaptureStatus.NoDevice : AudioCaptureStatus.Capturing,
+                MicrophoneDevice = discoveredMicDevice?.Name ?? string.Empty,
+                SystemAudioStatus = discoveredOutputDevice is null ? AudioCaptureStatus.NoDevice : AudioCaptureStatus.Idle,
+                SystemAudioDevice = discoveredOutputDevice?.Name ?? string.Empty,
                 TranscriptionStatus = TranscriptionPipelineStatus.Error,
                 TranscriptionConfigured = false,
                 TranscriptionProvider = "SherpaOnnx",
