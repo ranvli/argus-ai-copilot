@@ -323,6 +323,14 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
             _logger.LogInformation(
                 "[Pipeline.Provider] Transcription provider resolved. Provider={Provider} ModelId={ModelId}",
                 model.ProviderId, model.ModelId);
+
+            if (model.ProviderId.Equals("SherpaOnnx", StringComparison.OrdinalIgnoreCase))
+            {
+                _logger.LogInformation(
+                    "[Pipeline.Provider] SherpaOnnxLocal is active. Provider={Provider} ModelId={ModelId}",
+                    model.ProviderId,
+                    model.ModelId);
+            }
         }
         catch (InvalidOperationException ex)
         {
@@ -330,7 +338,7 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
                 "[Pipeline.Provider] TRANSCRIPTION IS NOT CONFIGURED. " +
                 "Audio will be captured but no text will be produced. " +
                 "Fix: set ArgusAI:Defaults:Transcription or add a SpeechTranscription WorkflowMapping " +
-                "pointing at an enabled profile with Provider=OpenAI or Provider=Whisper. " +
+                "pointing at an enabled profile with Provider=OpenAI, Provider=Whisper, Provider=WhisperNet, or Provider=SherpaOnnx. " +
                 "Detail: {Message}",
                 ex.Message);
         }
@@ -338,7 +346,7 @@ public sealed class TranscriptionPipeline : ITranscriptionPipeline, IAsyncDispos
         {
             _logger.LogError(
                 "[Pipeline.Provider] Provider type is not supported for transcription. " +
-                "Supported providers: OpenAI, Whisper, LocalAI, OpenAI_Compatible. " +
+                "Supported providers: OpenAI, Whisper, LocalAI, OpenAI_Compatible, WhisperNet, SherpaOnnx. " +
                 "Detail: {Message}",
                 ex.Message);
         }
