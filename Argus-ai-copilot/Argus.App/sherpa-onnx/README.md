@@ -5,46 +5,20 @@ This folder contains configuration and model assets for the in-process `SherpaOn
 - No separate local server is required.
 - The hot path stays in-memory for the sherpa backend.
 - Add one subfolder per profile/model id, e.g. `multilingual-streaming/`.
-- Each profile folder should contain a `profile.json` file plus the referenced model files.
+- For the first real integration, use an official sherpa-onnx omnilingual ASR model layout directly.
 
-Example expected files:
+Required files for the current real integration:
 
-- `profile.json`
+- `model.int8.onnx`
 - `tokens.txt`
-- `silero_vad.onnx`
-- `lid-encoder.onnx`
-- `lid-decoder.onnx`
-- language-routed ASR files (zipformer/transducer/omnilingual/etc.)
-- diarization segmentation and embedding models
 
 Expected default folder tree for the active test profile:
 
 ```text
 sherpa-onnx/
 └─ multilingual-streaming/
-   ├─ profile.json
+   ├─ model.int8.onnx
    ├─ tokens.txt
-   ├─ vad/
-   │  └─ silero_vad.onnx
-   ├─ lid/
-   │  ├─ lid-encoder.onnx
-   │  └─ lid-decoder.onnx
-   ├─ diarization/
-   │  ├─ segmentation.onnx
-   │  └─ speaker-embedding.onnx
-   └─ asr/
-      ├─ es/
-      │  └─ model.onnx
-      ├─ en/
-      │  └─ model.onnx
-      ├─ pt/
-      │  └─ model.onnx
-      ├─ it/
-      │  └─ model.onnx
-      ├─ de/
-      │  └─ model.onnx
-      └─ zh/
-         └─ model.onnx
 ```
 
 If any referenced file is missing, Argus will fail clearly on Sherpa startup and will not fall back to Whisper.

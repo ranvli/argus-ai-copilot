@@ -25,6 +25,7 @@ public static class TranscriptionServiceExtensions
         // WhisperFactory instance (with its loaded model) is reused across calls.
         services.AddSingleton<WhisperModelService>();
         services.AddSingleton<SherpaOnnxModelService>();
+        services.AddSingleton<ISherpaOnnxProvisioningService, SherpaOnnxProvisioningService>();
 
         // Factory bridge — lets ModelResolver (in Argus.AI) create local transcription
         // backends without taking a project dependency on Argus.Transcription.

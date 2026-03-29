@@ -1,3 +1,4 @@
+using Argus.Transcription.SherpaOnnx; // Importing the shared enum
 using Argus.Audio.Capture;
 using Argus.Audio.Devices;
 using Argus.Context.WindowContext;
@@ -8,6 +9,7 @@ using Argus.Core.Domain.Enums;
 using Argus.Infrastructure.Storage;
 using Argus.Transcription.Intent;
 using Argus.Transcription.Pipeline;
+using Argus.Transcription.SherpaOnnx;
 using Argus.Transcription.Text;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -43,6 +45,7 @@ internal sealed class SessionCoordinatorService
     private readonly IntentDetectionService _intentDetector;
     private readonly AssistantReactionService _assistantReaction;
     private readonly MicAudioSettings _micSettings;
+    private readonly ISherpaOnnxProvisioningService _sherpaProvisioning;
 
     // All state fields are accessed only via operations serialised through _gate.
     private readonly SemaphoreSlim _gate = new(1, 1);
@@ -93,7 +96,8 @@ internal sealed class SessionCoordinatorService
         TranscriptBuffer transcriptBuffer,
         IntentDetectionService intentDetector,
         AssistantReactionService assistantReaction,
-        MicAudioSettings micSettings)
+        MicAudioSettings micSettings,
+        ISherpaOnnxProvisioningService sherpaProvisioning)
     {
         _logger           = logger;
         _appState         = appState;
@@ -105,6 +109,7 @@ internal sealed class SessionCoordinatorService
         _intentDetector   = intentDetector;
         _assistantReaction = assistantReaction;
         _micSettings      = micSettings;
+        _sherpaProvisioning = sherpaProvisioning;
     }
 
     // ── BackgroundService ─────────────────────────────────────────────────────
@@ -517,6 +522,27 @@ internal sealed class SessionCoordinatorService
             // await Task.Delay(500, CancellationToken.None).ConfigureAwait(false);
 
             _logger.LogInformation("[Pipeline.Start] Calling pipeline.StartAsync for SessionId={Id}", sessionId);
+            if (_sherpaProvisioning.State is SherpaModelProvisioningState.Provisioning or SherpaModelProvisioningState.Error)
+            {
+                _audioStatus = new AudioStatusSnapshot
+                {
+                    MicrophoneStatus = AudioCaptureStatus.Capturing,
+                    MicrophoneDevice = micDevice.Name,
+                    SystemAudioStatus = outputDevice is null ? AudioCaptureStatus.NoDevice : AudioCaptureStatus.Idle,
+                    SystemAudioDevice = outputDevice?.Name ?? string.Empty,
+                    TranscriptionStatus = TranscriptionPipelineStatus.Error,
+                    TranscriptionConfigured = true,
+                    TranscriptionProvider = "SherpaOnnx",
+                    TranscriptionModel = "multilingual-streaming",
+                    TranscriptionError = _sherpaProvisioning.LastError ?? "Sherpa model provisioning is not ready.",
+                    TranscriptionLanguageMode = "forced/es",
+                    SherpaProvisioningState = _sherpaProvisioning.State,
+                    SherpaModelRoot = _sherpaProvisioning.ModelRoot
+                };
+                AudioStatusChanged?.Invoke(this, _audioStatus);
+                return;
+            }
+
             await _pipeline.StartAsync(sessionId, _pipelineStoppingCts.Token);
             _logger.LogInformation("[Pipeline.Start] pipeline.StartAsync returned. Capture sources are running.");
         }
@@ -534,7 +560,9 @@ internal sealed class SessionCoordinatorService
                 TranscriptionProvider = "SherpaOnnx",
                 TranscriptionModel = "multilingual-streaming",
                 TranscriptionError = ex.Message,
-                TranscriptionLanguageMode = "forced/es"
+                TranscriptionLanguageMode = "forced/es",
+                SherpaProvisioningState = _sherpaProvisioning.State,
+                SherpaModelRoot = _sherpaProvisioning.ModelRoot
             };
             AudioStatusChanged?.Invoke(this, _audioStatus);
             // Clean up the scope since startup failed.

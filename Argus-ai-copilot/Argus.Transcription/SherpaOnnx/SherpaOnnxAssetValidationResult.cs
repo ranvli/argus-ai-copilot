@@ -4,8 +4,8 @@ public sealed class SherpaOnnxAssetValidationResult
 {
     public bool IsValid { get; init; }
     public string ProfileRoot { get; init; } = string.Empty;
-    public string ProfileJsonPath { get; init; } = string.Empty;
-    public bool ProfileJsonExists { get; init; }
+    public string ModelPath { get; init; } = string.Empty;
+    public string TokensPath { get; init; } = string.Empty;
     public string? Reason { get; init; }
     public IReadOnlyList<string> MissingFiles { get; init; } = [];
     public string? ExpectedLayoutHint { get; init; }
@@ -16,7 +16,7 @@ public sealed class SherpaOnnxAssetValidationResult
             return "SherpaOnnx assets ready.";
 
         if (MissingFiles.Count == 0)
-            return $"SherpaOnnx assets missing. Root='{ProfileRoot}'. Profile='{ProfileJsonPath}'. Reason={Reason}. ExpectedLayout={ExpectedLayoutHint}.";
+            return $"SherpaOnnx assets missing. Root='{ProfileRoot}'. Model='{ModelPath}'. Tokens='{TokensPath}'. Reason={Reason}. ExpectedLayout={ExpectedLayoutHint}.";
 
         return $"SherpaOnnx assets missing. Root='{ProfileRoot}'. Missing: {string.Join(", ", MissingFiles)}. ExpectedLayout={ExpectedLayoutHint}.";
     }

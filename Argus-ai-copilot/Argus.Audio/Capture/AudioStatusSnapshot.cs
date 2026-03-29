@@ -65,6 +65,12 @@ public sealed class AudioStatusSnapshot
     /// <summary>Full path to the local Whisper GGML model file, or empty when not applicable.</summary>
     public string WhisperModelPath { get; init; } = string.Empty;
 
+    /// <summary>Provisioning/readiness state of the embedded Sherpa model assets.</summary>
+    public SherpaModelProvisioningState SherpaProvisioningState { get; init; } = SherpaModelProvisioningState.NotApplicable;
+
+    /// <summary>Resolved root path for Sherpa model assets.</summary>
+    public string SherpaModelRoot { get; init; } = string.Empty;
+
     // ── Display helpers ───────────────────────────────────────────────────────
 
     public string MicrophoneStatusDisplay => MicrophoneStatus switch
@@ -148,6 +154,16 @@ public sealed class AudioStatusSnapshot
         WhisperModelDownloadState.Failed        => "✘ Download failed",
         _                                       => string.Empty
     };
+
+    public string SherpaProvisioningStateDisplay => SherpaProvisioningState switch
+    {
+        SherpaModelProvisioningState.NotApplicable => string.Empty,
+        SherpaModelProvisioningState.NotChecked    => "Not checked",
+        SherpaModelProvisioningState.Provisioning  => "⬇ Provisioning Sherpa model…",
+        SherpaModelProvisioningState.Ready         => "✔ Sherpa model ready",
+        SherpaModelProvisioningState.Error         => "✘ Sherpa model error",
+        _                                          => string.Empty
+    };
 }
 
 /// <summary>Transcription pipeline operational state.</summary>
@@ -172,4 +188,13 @@ public enum WhisperModelDownloadState
     Ready,
     /// <summary>Download or initialisation failed.</summary>
     Failed
+}
+
+public enum SherpaModelProvisioningState
+{
+    NotApplicable,
+    NotChecked,
+    Provisioning,
+    Ready,
+    Error
 }

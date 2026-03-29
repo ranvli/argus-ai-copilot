@@ -287,7 +287,7 @@ public partial class MainWindow : Window
         {
             TranscriptionNotConfiguredBanner.Visibility = Visibility.Visible;
             TranscriptionNotConfiguredText.Text =
-                $"? SherpaOnnxLocal assets are missing or incomplete.\n{audio.TranscriptionError}";
+                $"? SherpaOnnxLocal state: {audio.SherpaProvisioningStateDisplay}.\n{audio.TranscriptionError}\nRoot: {audio.SherpaModelRoot}";
         }
         else
         {

@@ -35,4 +35,15 @@ public sealed class TranscriptionRuntimeSettings
     /// Root folder for embedded sherpa-onnx models.
     /// </summary>
     public string SherpaModelsRoot { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Enables automatic provisioning of sherpa-onnx model assets at startup.
+    /// </summary>
+    public bool EnableSherpaAutoProvisioning { get; set; } = true;
+
+    /// <summary>
+    /// Optional override URL for the sherpa-onnx omnilingual model package.
+    /// When empty, the built-in official release URL is used.
+    /// </summary>
+    public string SherpaModelPackageUrl { get; set; } = string.Empty;
 }

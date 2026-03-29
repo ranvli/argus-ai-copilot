@@ -54,9 +54,10 @@ public sealed class SherpaOnnxModelService
         var result = SherpaOnnxConfigParser.ValidateAssets(profile, root);
 
         _logger.LogInformation(
-            "[SherpaAssets] root={Root} profileJsonExists={ProfileJsonExists}",
+            "[SherpaAssets] root={Root} modelExists={ModelExists} tokensExists={TokensExists}",
             result.ProfileRoot,
-            result.ProfileJsonExists);
+            File.Exists(result.ModelPath),
+            File.Exists(result.TokensPath));
 
         foreach (var missing in result.MissingFiles)
         {
@@ -72,4 +73,13 @@ public sealed class SherpaOnnxModelService
 
         return result;
     }
+
+    public SherpaOnnxAssetValidationResult ValidateDefaultAssets()
+        => SherpaOnnxConfigParser.ValidateAssets(new Argus.AI.Configuration.ProviderProfile
+        {
+            Name = "SherpaOnnxLocal",
+            Provider = "SherpaOnnx",
+            ModelId = "multilingual-streaming",
+            Enabled = true
+        }, GetProfileRoot("multilingual-streaming"));
 }
