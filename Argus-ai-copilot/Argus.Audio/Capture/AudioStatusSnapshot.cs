@@ -53,43 +53,28 @@ public sealed class AudioStatusSnapshot
         get
         {
             if (MicrophoneStatus != AudioCaptureStatus.Capturing) return string.Empty;
-            var rms    = MicConvertedRms;
+            var rms = MicConvertedRms;
             var filled = Math.Clamp((int)Math.Round(rms * 50), 0, 10);
-            var bar    = new string('█', filled) + new string('░', 10 - filled);
-            var label  = rms < 0.002f ? "SILENT" : $"RMS {rms:F3}";
+            var bar = new string('█', filled) + new string('░', 10 - filled);
+            var label = rms < 0.002f ? "SILENT" : $"RMS {rms:F3}";
             return $"{bar}  {label}";
         }
     }
 
-    public string MicSignalDebugDisplay
-    {
-        get
-        {
-            if (MicrophoneStatus != AudioCaptureStatus.Capturing) return string.Empty;
-            return $"[{ActiveMicBackend}]  native {MicNativeRms:F4}  →  conv {MicConvertedRms:F4}";
-        }
-    }
-
-    public string SystemAudioStatusDisplay => SystemAudioStatus switch
-    {
-        AudioCaptureStatus.Capturing   => SystemAudioDevice.Length > 0
-                                            ? $"● Capturing  — {SystemAudioDevice}"
-                                            : "● Capturing",
-        AudioCaptureStatus.Paused      => "⏸ Paused",
-        AudioCaptureStatus.DeviceError => $"⚠ {SystemAudioError ?? "device error"}",
-        AudioCaptureStatus.NoDevice    => "Not available",
-        _                              => "Idle"
-    };
+    public string MicSignalDebugDisplay =>
+        MicrophoneStatus == AudioCaptureStatus.Capturing
+            ? $"[{ActiveMicBackend}]  native {MicNativeRms:F4}  →  conv {MicConvertedRms:F4}"
+            : string.Empty;
 
     public string SystemAudioLevelDisplay
     {
         get
         {
             if (SystemAudioStatus != AudioCaptureStatus.Capturing) return string.Empty;
-            var rms    = SystemAudioConvertedRms;
+            var rms = SystemAudioConvertedRms;
             var filled = Math.Clamp((int)Math.Round(rms * 50), 0, 10);
-            var bar    = new string('█', filled) + new string('░', 10 - filled);
-            var label  = rms < 0.002f ? "SILENT" : $"RMS {rms:F3}";
+            var bar = new string('█', filled) + new string('░', 10 - filled);
+            var label = rms < 0.002f ? "SILENT" : $"RMS {rms:F3}";
             return $"{bar}  {label}";
         }
     }
@@ -98,6 +83,16 @@ public sealed class AudioStatusSnapshot
         SystemAudioStatus == AudioCaptureStatus.Capturing
             ? $"[WASAPI loopback]  native {SystemAudioNativeRms:F4}  →  conv {SystemAudioConvertedRms:F4}"
             : string.Empty;
+
+    public string SystemAudioStatusDisplay => SystemAudioStatus switch
+    {
+        AudioCaptureStatus.Capturing =>
+            $"● Capturing  — {(SystemAudioDevice.Length > 0 ? SystemAudioDevice : "system audio")}  |  {SystemAudioLevelDisplay}  |  {SystemAudioSignalDebugDisplay}",
+        AudioCaptureStatus.Paused      => "⏸ Paused",
+        AudioCaptureStatus.DeviceError => $"⚠ {SystemAudioError ?? "device error"}",
+        AudioCaptureStatus.NoDevice    => "Not available",
+        _                              => "Idle"
+    };
 
     public string TranscriptionStatusDisplay => TranscriptionStatus switch
     {
