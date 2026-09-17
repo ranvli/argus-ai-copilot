@@ -49,7 +49,6 @@ internal sealed class SessionCoordinatorService
     private readonly ISherpaOnnxPreflightService _sherpaPreflight;
     private readonly TranscriptionRuntimeSettings _runtimeSettings;
 
-    // All state fields are accessed only via operations serialised through _gate.
     private readonly SemaphoreSlim _gate = new(1, 1);
     private SessionLifecycleState _state = SessionLifecycleState.Idle;
     private Session? _activeSession;
@@ -58,35 +57,23 @@ internal sealed class SessionCoordinatorService
     private string _activeWindowTitle  = string.Empty;
     private int    _activeProcessId;
 
-    // ── Transcription pipeline ─────────────────────────────────────────────
-    // Owned by the coordinator; created fresh for each session.
-    // _pipelineScope MUST outlive the pipeline — it owns the Transient capture sources.
-    // Dispose only after pipeline.StopAsync() returns.
     private ITranscriptionPipeline? _pipeline;
     private AsyncServiceScope?      _pipelineScope;
     private CancellationTokenSource? _pipelineStoppingCts;
     private int _transcriptSegmentCount;
-
-    // ── ISessionCoordinator ───────────────────────────────────────────────────
 
     public SessionLifecycleState State  => _state;
     public Session? ActiveSession       => _activeSession;
 
     public event EventHandler<SessionStateChangedEventArgs>? SessionStateChanged;
 
-    // ── ISessionStatePublisher ────────────────────────────────────────────────
-
     private SessionStateSnapshot _snapshot = SessionStateSnapshot.Idle;
     public SessionStateSnapshot Snapshot => _snapshot;
     public event EventHandler<SessionStateSnapshot>? SnapshotChanged;
 
-    // ── IAudioStatusPublisher ─────────────────────────────────────────────────
-
     private AudioStatusSnapshot _audioStatus = AudioStatusSnapshot.Idle;
     public AudioStatusSnapshot AudioStatus => _audioStatus;
     public event EventHandler<AudioStatusSnapshot>? AudioStatusChanged;
-
-    // ─────────────────────────────────────────────────────────────────────────
 
     public SessionCoordinatorService(
         ILogger<SessionCoordinatorService> logger,
@@ -118,8 +105,6 @@ internal sealed class SessionCoordinatorService
         _runtimeSettings = runtimeSettings.Value;
     }
 
-    // ── BackgroundService ─────────────────────────────────────────────────────
-
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _logger.LogInformation("{Service} started.", nameof(SessionCoordinatorService));
@@ -127,7 +112,6 @@ internal sealed class SessionCoordinatorService
         _appState.ModeChanged              += OnAppModeChanged;
         _windowTracker.ActiveWindowChanged += OnActiveWindowChanged;
 
-        // Seed window state from whatever is already visible.
         if (_windowTracker.Current is { } initial)
         {
             _activeProcessName = initial.ProcessName;
@@ -156,12 +140,10 @@ internal sealed class SessionCoordinatorService
         _logger.LogInformation("{Service} stopped.", nameof(SessionCoordinatorService));
     }
 
-    // ── ISessionCoordinator: commands ─────────────────────────────────────────
-
     public async Task<Session> StartSessionAsync(
         string title,
         SessionType type     = SessionType.FreeForm,
-        ListeningMode mode   = ListeningMode.Microphone,
+        ListeningMode mode   = ListeningMode.MicrophoneAndSystem,
         CancellationToken ct = default)
     {
         await _gate.WaitAsync(ct);
@@ -228,9 +210,6 @@ internal sealed class SessionCoordinatorService
             await TransitionAsync(SessionLifecycleState.Listening, session, ct);
             _appState.StartListening();
 
-            // ── Start the transcription pipeline ──────────────────────────
-            // Pass CancellationToken.None: the pipeline lifetime is managed by
-            // _pipelineStoppingCts inside StartPipelineAsync — not by the caller's ct.
             await StartPipelineAsync(session.Id);
 
             _logger.LogInformation(
@@ -253,7 +232,6 @@ internal sealed class SessionCoordinatorService
                 return;
             }
 
-            // Pause audio before persisting so state is consistent
             _pipeline?.Pause();
 
             await using var scope = _scopeFactory.CreateAsyncScope();
@@ -339,7 +317,6 @@ internal sealed class SessionCoordinatorService
             await TransitionAsync(SessionLifecycleState.Stopping, session, ct);
             _appState.StopListening();
 
-            // ── Stop the transcription pipeline (flushes remaining chunks) ──
             await StopPipelineAsync(ct);
 
             if (session is not null)
@@ -379,8 +356,6 @@ internal sealed class SessionCoordinatorService
         }
         finally { _gate.Release(); }
     }
-
-    // ── ISessionCoordinator: ingestion ────────────────────────────────────────
 
     public async Task IngestTranscriptSegmentAsync(TranscriptSegment segment, CancellationToken ct = default)
     {
@@ -434,8 +409,6 @@ internal sealed class SessionCoordinatorService
             appEvent.Type, appEvent.SessionId);
     }
 
-    // ── Pipeline management ───────────────────────────────────────────────────
-
     private async Task StartPipelineAsync(Guid sessionId)
     {
         _logger.LogInformation("[Pipeline.Start] Acquiring pipeline scope for SessionId={Id}", sessionId);
@@ -444,12 +417,9 @@ internal sealed class SessionCoordinatorService
 
         try
         {
-            // ── Enumerate all audio endpoints at pipeline start ───────────────
-            // This gives us a complete picture of the audio hardware in the log.
             if (_deviceDiscovery is Argus.Audio.Devices.WindowsAudioDeviceDiscovery winDisc)
                 winDisc.LogAllEndpoints();
 
-            // ── Device discovery ────────────────────────────────────────────
             var micDevice    = _deviceDiscovery.GetDefaultInputDevice();
             var outputDevice = _deviceDiscovery.GetDefaultOutputDevice();
             discoveredMicDevice = micDevice;
@@ -468,16 +438,9 @@ internal sealed class SessionCoordinatorService
             }
 
             _logger.LogInformation(
-                "[Pipeline.Start] Devices: mic='{Mic}'  output='{Output}'",
+                "[Pipeline.Start] Devices: mic='{Mic}' output='{Output}' captureMode=MicrophoneAndSystem",
                 micDevice.Name, outputDevice?.Name ?? "none");
 
-            // ── Build sources ────────────────────────────────────────────────
-            // IMPORTANT: do NOT use `await using` or `using` here.
-            // _pipelineScope must outlive this method — it owns the Transient
-            // MicrophoneCaptureSource and SystemAudioCaptureSource instances.
-            // Disposing the scope while capture is running would call Dispose()
-            // on those sources and stop WASAPI recording immediately.
-            // Scope is disposed in StopPipelineAsync, after pipeline.StopAsync() returns.
             _pipelineScope = _scopeFactory.CreateAsyncScope();
             var sp = _pipelineScope.Value.ServiceProvider;
 
@@ -485,26 +448,17 @@ internal sealed class SessionCoordinatorService
 
             var micSource = sp.GetRequiredService<MicrophoneCaptureSource>();
 
-            // Acquire MMDevice handles. The MMDeviceEnumerator itself can be
-            // short-lived — handles are owned by the source objects.
             using var enumerator = new NAudio.CoreAudioApi.MMDeviceEnumerator();
             var mmMic = enumerator.GetDevice(micDevice.Id);
             micSource.SetDevice(mmMic);
 
-            // ── Apply mic backend settings ─────────────────────────────────────
-            // Honor _micSettings.Backend exactly — never override it here.
-            //   WaveIn / Wasapi → explicit; MicrophoneCaptureSource.StartAsync will
-            //                     open exactly that backend or throw a clear error.
-            //   Auto            → MicrophoneCaptureSource.StartAsync probes both
-            //                     backends for ~1.5 s and selects the one with signal.
             micSource.SelectedBackend    = _micSettings.Backend;
             micSource.WaveInDeviceNumber = _micSettings.WaveInDeviceNumber;
             micSource.WasapiContCapture  = _micSettings.Backend is MicBackend.Wasapi or MicBackend.Auto;
             micSource.SetChunkDuration(TimeSpan.FromMilliseconds(_runtimeSettings.SherpaChunkDurationMs));
 
             _logger.LogInformation(
-                "[Pipeline.Start] MicrophoneCaptureSource configured: '{Device}' " +
-                "RequestedBackend={Requested} WaveInDevice={WaveInDevice} ChunkMs={ChunkMs}",
+                "[Pipeline.Start] MicrophoneCaptureSource configured: '{Device}' RequestedBackend={Requested} WaveInDevice={WaveInDevice} ChunkMs={ChunkMs}",
                 micDevice.Name, _micSettings.Backend, _micSettings.WaveInDeviceNumber, _runtimeSettings.SherpaChunkDurationMs);
 
             SystemAudioCaptureSource? sysSource = null;
@@ -513,43 +467,29 @@ internal sealed class SessionCoordinatorService
                 sysSource = sp.GetRequiredService<SystemAudioCaptureSource>();
                 var mmOutput = enumerator.GetDevice(outputDevice.Id);
                 sysSource.SetDevice(mmOutput);
-                _logger.LogInformation("[Pipeline.Start] SystemAudioCaptureSource configured: '{Device}'", outputDevice.Name);
+                _logger.LogInformation(
+                    "[Pipeline.Start] SystemAudioCaptureSource configured and ENABLED: '{Device}'",
+                    outputDevice.Name);
+            }
+            else
+            {
+                _logger.LogWarning("[Pipeline.Start] No output device found — continuing with microphone only.");
             }
 
-            // ── Create independent stopping CTS for the pipeline ─────────────
-            // This CTS is NOT linked to any external CancellationToken.
-            // The only way to cancel it is to call StopPipelineAsync.
             _pipelineStoppingCts?.Dispose();
             _pipelineStoppingCts = new CancellationTokenSource();
             _logger.LogInformation("[Pipeline.Start] Pipeline stopping CTS created (not linked to any external token).");
 
-            // ── Wire pipeline ────────────────────────────────────────────────
             var pipeline = sp.GetRequiredService<ITranscriptionPipeline>();
             if (pipeline is Argus.Transcription.Pipeline.TranscriptionPipeline concrete)
             {
                 concrete.SetSources(micSource, sysSource);
-
-                // ── Mic-only debug mode ───────────────────────────────────────
-                // Suppresses loopback while diagnosing the microphone capture path.
-                // Remove or set to false once mic is confirmed working.
-                concrete.SkipSystemAudioCapture = true;
+                concrete.SkipSystemAudioCapture = false;
             }
 
             _pipeline = pipeline;
             _pipeline.StatusChanged    += OnPipelineStatusChanged;
             _pipeline.SegmentsProduced += OnSegmentsProduced;
-
-            // ── WASAPI isolation test ─────────────────────────────────────────
-            // Isolation test confirmed: fresh handle records real signal.
-            // COM/MMDevice stale-handle bug is now fixed (store ID, resolve fresh
-            // in StartAsync).  Test disabled; source quality is the new focus.
-            // Uncomment to re-run if signal disappears again.
-            //
-            // using var isoEnum  = new NAudio.CoreAudioApi.MMDeviceEnumerator();
-            // var isoDevice      = isoEnum.GetDevice(micDevice.Id);
-            // await Argus.Audio.Capture.WasapiIsolationTest.RunAsync(
-            //     isoDevice, _logger, durationSeconds: 5, ct: _pipelineStoppingCts.Token);
-            // await Task.Delay(500, CancellationToken.None).ConfigureAwait(false);
 
             _logger.LogInformation("[Pipeline.Start] Calling pipeline.StartAsync for SessionId={Id}", sessionId);
             if (_sherpaProvisioning.State is SherpaModelProvisioningState.Provisioning or SherpaModelProvisioningState.Error
@@ -578,7 +518,7 @@ internal sealed class SessionCoordinatorService
             }
 
             await _pipeline.StartAsync(sessionId, _pipelineStoppingCts.Token);
-            _logger.LogInformation("[Pipeline.Start] pipeline.StartAsync returned. Capture sources are running.");
+            _logger.LogInformation("[Pipeline.Start] pipeline.StartAsync returned. Microphone and system loopback capture are active when devices are available.");
         }
         catch (Exception ex)
         {
@@ -600,7 +540,6 @@ internal sealed class SessionCoordinatorService
                 SherpaNativeReadinessState = _sherpaPreflight.State
             };
             AudioStatusChanged?.Invoke(this, _audioStatus);
-            // Clean up the scope since startup failed.
             if (_pipelineScope is { } failedScope)
                 await failedScope.DisposeAsync();
             _pipelineScope = null;
@@ -620,7 +559,7 @@ internal sealed class SessionCoordinatorService
 
         _logger.LogInformation("[Pipeline.Stop] Signalling pipeline stopping CTS.");
         try { _pipelineStoppingCts?.Cancel(); }
-        catch (ObjectDisposedException) { /* already disposed — ignore */ }
+        catch (ObjectDisposedException) { }
 
         _pipeline.StatusChanged    -= OnPipelineStatusChanged;
         _pipeline.SegmentsProduced -= OnSegmentsProduced;
@@ -644,8 +583,6 @@ internal sealed class SessionCoordinatorService
             }
             _pipeline = null;
 
-            // Dispose capture sources by disposing the scope AFTER the pipeline
-            // has fully stopped. This is the correct disposal order.
             _logger.LogInformation("[Pipeline.Stop] Disposing pipeline scope (capture sources will be disposed now).");
             if (_pipelineScope is { } pipelineScope)
                 await pipelineScope.DisposeAsync();
@@ -657,8 +594,6 @@ internal sealed class SessionCoordinatorService
             _logger.LogInformation("[Pipeline.Stop] Pipeline scope and stopping CTS disposed.");
         }
     }
-
-    // ── Pipeline event handlers ───────────────────────────────────────────────
 
     private void OnPipelineStatusChanged(object? sender, AudioStatusSnapshot status)
     {
@@ -686,7 +621,6 @@ internal sealed class SessionCoordinatorService
                 ? (meaningfulSegments[0].Text.Length > 120 ? meaningfulSegments[0].Text[..120] + "…" : meaningfulSegments[0].Text)
                 : string.Empty);
 
-        // Push to rolling buffer and check for intent
         _transcriptBuffer.Push(meaningfulSegments);
         var recentText = _transcriptBuffer.GetRecentText(10);
         var intent     = _intentDetector.Detect(meaningfulSegments);
@@ -702,16 +636,10 @@ internal sealed class SessionCoordinatorService
             assistantTriggered);
 
         if (intent.HasIntent)
-        {
             _assistantReaction.OnIntentDetected(intent, recentText);
-        }
 
-        // Persist each segment and publish to UI via snapshot update
         _ = PersistSegmentsAsync(meaningfulSegments);
-
-        // Notify the UI with the latest segment texts
         TranscriptSegmentsReceived?.Invoke(this, meaningfulSegments);
-
         PublishSnapshot();
     }
 
@@ -728,8 +656,6 @@ internal sealed class SessionCoordinatorService
             _logger.LogError(ex, "Failed to persist {Count} transcript segment(s).", segments.Count);
         }
     }
-
-    // ── Window change handler ─────────────────────────────────────────────────
 
     private void OnActiveWindowChanged(object? sender, ActiveWindowChangedEventArgs e)
     {
@@ -750,8 +676,6 @@ internal sealed class SessionCoordinatorService
 
         PublishSnapshot();
     }
-
-    // ── Private helpers ───────────────────────────────────────────────────────
 
     private Task TransitionAsync(
         SessionLifecycleState next, Session? session, CancellationToken ct)
@@ -831,11 +755,5 @@ internal sealed class SessionCoordinatorService
         }
     }
 
-    // ── Extra events ──────────────────────────────────────────────────────────
-
-    /// <summary>
-    /// Raised whenever new transcript segments arrive from the pipeline.
-    /// UI subscribers must marshal to the UI thread before updating controls.
-    /// </summary>
     public event EventHandler<IReadOnlyList<TranscriptSegment>>? TranscriptSegmentsReceived;
 }
