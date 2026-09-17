@@ -378,7 +378,7 @@ internal sealed class SessionCoordinatorService
             if (wantsSystem && discoveredOutputDevice is not null)
             {
                 sysSource = sp.GetRequiredService<SystemAudioCaptureSource>();
-                using var mmOutput = enumerator.GetDevice(discoveredOutputDevice.Id);
+                var mmOutput = enumerator.GetDevice(discoveredOutputDevice.Id);
                 sysSource.SetDevice(mmOutput);
                 sysSource.SetChunkDuration(TimeSpan.FromMilliseconds(_runtimeSettings.SherpaChunkDurationMs));
 
@@ -526,7 +526,7 @@ internal sealed class SessionCoordinatorService
             "[Transcript.Batch] sessionId={SessionId} count={Count} speakerTypes={SpeakerTypes} intent={Intent}",
             _activeSession.Id,
             meaningfulSegments.Count,
-            string.Join(',', meaningfulSegments.Select(s => s.SpeakerType).Distinct()),
+            string.Join(",", meaningfulSegments.Select(s => s.SpeakerType).Distinct()),
             intent.Intent);
 
         if (intent.HasIntent)
