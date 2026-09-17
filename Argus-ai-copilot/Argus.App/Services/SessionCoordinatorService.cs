@@ -6,9 +6,9 @@ using Argus.Core.Contracts.Services;
 using Argus.Core.Domain.Entities;
 using Argus.Core.Domain.Enums;
 using Argus.Infrastructure.Storage;
+using Argus.Transcription.Configuration;
 using Argus.Transcription.Intent;
 using Argus.Transcription.Pipeline;
-using Argus.Transcription.Configuration;
 using Argus.Transcription.SherpaOnnx;
 using Argus.Transcription.Text;
 using Microsoft.Extensions.DependencyInjection;
@@ -17,21 +17,6 @@ using Microsoft.Extensions.Logging;
 
 namespace Argus.App.Services;
 
-/// <summary>
-/// Long-running background service and authoritative session coordinator.
-/// Owns the session lifecycle state machine, subscribes to active-window
-/// changes, drives the transcription pipeline, and publishes snapshots for the UI.
-///
-/// State machine:
-///   Idle ──StartSession──▶ Listening ──Pause──▶ Paused
-///                               ▲                  │
-///                               └────Resume─────────┘
-///                               │
-///                             Stop
-///                               │
-///                               ▼
-///                           Stopping ──(finalise)──▶ Completed ──▶ Idle
-/// </summary>
 internal sealed class SessionCoordinatorService
     : BackgroundService, ISessionCoordinator, ISessionStatePublisher, IAudioStatusPublisher
 {
@@ -54,17 +39,16 @@ internal sealed class SessionCoordinatorService
     private Session? _activeSession;
     private int _sessionEventCount;
     private string _activeProcessName = string.Empty;
-    private string _activeWindowTitle  = string.Empty;
-    private int    _activeProcessId;
+    private string _activeWindowTitle = string.Empty;
+    private int _activeProcessId;
 
     private ITranscriptionPipeline? _pipeline;
-    private AsyncServiceScope?      _pipelineScope;
+    private AsyncServiceScope? _pipelineScope;
     private CancellationTokenSource? _pipelineStoppingCts;
     private int _transcriptSegmentCount;
 
-    public SessionLifecycleState State  => _state;
-    public Session? ActiveSession       => _activeSession;
-
+    public SessionLifecycleState State => _state;
+    public Session? ActiveSession => _activeSession;
     public event EventHandler<SessionStateChangedEventArgs>? SessionStateChanged;
 
     private SessionStateSnapshot _snapshot = SessionStateSnapshot.Idle;
@@ -90,16 +74,16 @@ internal sealed class SessionCoordinatorService
         ISherpaOnnxPreflightService sherpaPreflight,
         Microsoft.Extensions.Options.IOptions<TranscriptionRuntimeSettings> runtimeSettings)
     {
-        _logger           = logger;
-        _appState         = appState;
-        _scopeFactory     = scopeFactory;
-        _artifactStorage  = artifactStorage;
-        _windowTracker    = windowTracker;
-        _deviceDiscovery  = deviceDiscovery;
+        _logger = logger;
+        _appState = appState;
+        _scopeFactory = scopeFactory;
+        _artifactStorage = artifactStorage;
+        _windowTracker = windowTracker;
+        _deviceDiscovery = deviceDiscovery;
         _transcriptBuffer = transcriptBuffer;
-        _intentDetector   = intentDetector;
+        _intentDetector = intentDetector;
         _assistantReaction = assistantReaction;
-        _micSettings      = micSettings;
+        _micSettings = micSettings;
         _sherpaProvisioning = sherpaProvisioning;
         _sherpaPreflight = sherpaPreflight;
         _runtimeSettings = runtimeSettings.Value;
@@ -108,50 +92,39 @@ internal sealed class SessionCoordinatorService
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _logger.LogInformation("{Service} started.", nameof(SessionCoordinatorService));
-
-        _appState.ModeChanged              += OnAppModeChanged;
+        _appState.ModeChanged += OnAppModeChanged;
         _windowTracker.ActiveWindowChanged += OnActiveWindowChanged;
 
         if (_windowTracker.Current is { } initial)
         {
             _activeProcessName = initial.ProcessName;
-            _activeWindowTitle  = initial.WindowTitle;
-            _activeProcessId   = initial.ProcessId;
+            _activeWindowTitle = initial.WindowTitle;
+            _activeProcessId = initial.ProcessId;
             PublishSnapshot();
         }
 
-        try
-        {
-            await Task.Delay(Timeout.Infinite, stoppingToken);
-        }
+        try { await Task.Delay(Timeout.Infinite, stoppingToken); }
         catch (OperationCanceledException) { }
         finally
         {
-            _appState.ModeChanged              -= OnAppModeChanged;
+            _appState.ModeChanged -= OnAppModeChanged;
             _windowTracker.ActiveWindowChanged -= OnActiveWindowChanged;
-
             if (_state is SessionLifecycleState.Listening or SessionLifecycleState.Paused)
-            {
-                _logger.LogWarning("Host shutting down with active session — forcing stop.");
                 await StopSessionAsync(CancellationToken.None);
-            }
         }
-
-        _logger.LogInformation("{Service} stopped.", nameof(SessionCoordinatorService));
     }
 
     public async Task<Session> StartSessionAsync(
         string title,
-        SessionType type     = SessionType.FreeForm,
-        ListeningMode mode   = ListeningMode.MicrophoneAndSystem,
+        SessionType type = SessionType.FreeForm,
+        ListeningMode mode = ListeningMode.MicrophoneAndSystem,
         CancellationToken ct = default)
     {
         await _gate.WaitAsync(ct);
         try
         {
             if (_state is not SessionLifecycleState.Idle)
-                throw new InvalidOperationException(
-                    $"Cannot start a session while in state '{_state}'. Stop the current session first.");
+                throw new InvalidOperationException($"Cannot start a session while in state '{_state}'.");
 
             if (!_sherpaProvisioning.IsReady || !_sherpaPreflight.IsSafeToUse)
             {
@@ -166,55 +139,51 @@ internal sealed class SessionCoordinatorService
                     TranscriptionProvider = "SherpaOnnx",
                     TranscriptionModel = SherpaOnnxModelService.DefaultModelId,
                     TranscriptionError = reason,
-                    TranscriptionLanguageMode = "forced/es",
+                    TranscriptionLanguageMode = "requested/es actual/unknown",
                     SherpaProvisioningState = _sherpaProvisioning.State,
                     SherpaModelRoot = _sherpaProvisioning.ModelRoot,
                     SherpaNativeReadinessState = _sherpaPreflight.State
                 };
                 AudioStatusChanged?.Invoke(this, _audioStatus);
-
                 throw new InvalidOperationException(reason);
             }
 
             var session = new Session
             {
-                Title              = string.IsNullOrWhiteSpace(title)
-                                        ? $"Session {DateTimeOffset.Now:yyyy-MM-dd HH:mm}"
-                                        : title,
-                Type               = type,
-                ListeningMode      = mode,
-                StartedAt          = DateTimeOffset.UtcNow,
-                LifecycleState     = SessionLifecycleState.Listening,
+                Title = string.IsNullOrWhiteSpace(title)
+                    ? $"Session {DateTimeOffset.Now:yyyy-MM-dd HH:mm}"
+                    : title,
+                Type = type,
+                ListeningMode = mode,
+                StartedAt = DateTimeOffset.UtcNow,
+                LifecycleState = SessionLifecycleState.Listening,
                 ApplicationContext = _activeProcessName
             };
 
             await using var scope = _scopeFactory.CreateAsyncScope();
             var sessions = scope.ServiceProvider.GetRequiredService<ISessionRepository>();
-            var events   = scope.ServiceProvider.GetRequiredService<IAppEventRepository>();
-
+            var events = scope.ServiceProvider.GetRequiredService<IAppEventRepository>();
             await sessions.AddAsync(session, ct);
             await events.AddAsync(new AppEvent
             {
-                Type      = AppEventType.SessionStarted,
+                Type = AppEventType.SessionStarted,
                 SessionId = session.Id,
-                Details   = $"Title='{session.Title}' Type={session.Type} Mode={session.ListeningMode} App={_activeProcessName}"
+                Details = $"Title='{session.Title}' Type={session.Type} Mode={session.ListeningMode} App={_activeProcessName}"
             }, ct);
 
             _artifactStorage.EnsureSessionFolders(session.Id);
-
-            _activeSession          = session;
-            _sessionEventCount      = 1;
+            _activeSession = session;
+            _sessionEventCount = 1;
             _transcriptSegmentCount = 0;
             _transcriptBuffer.Clear();
 
+            _logger.LogInformation(
+                "[Audio.Session] sessionId={SessionId} mode={Mode} startedAtUtc={Utc:O}",
+                session.Id, session.ListeningMode, session.StartedAt);
+
             await TransitionAsync(SessionLifecycleState.Listening, session, ct);
             _appState.StartListening();
-
-            await StartPipelineAsync(session.Id);
-
-            _logger.LogInformation(
-                "Session started. Id={Id} Title='{Title}' Type={Type} Mode={Mode}",
-                session.Id, session.Title, session.Type, session.ListeningMode);
+            await StartPipelineAsync(session.Id, session.ListeningMode);
 
             return session;
         }
@@ -226,37 +195,29 @@ internal sealed class SessionCoordinatorService
         await _gate.WaitAsync(ct);
         try
         {
-            if (_state is not SessionLifecycleState.Listening)
-            {
-                _logger.LogWarning("PauseSession called in state '{State}' — ignored.", _state);
-                return;
-            }
-
+            if (_state is not SessionLifecycleState.Listening) return;
             _pipeline?.Pause();
 
             await using var scope = _scopeFactory.CreateAsyncScope();
             var sessions = scope.ServiceProvider.GetRequiredService<ISessionRepository>();
-            var events   = scope.ServiceProvider.GetRequiredService<IAppEventRepository>();
-
+            var events = scope.ServiceProvider.GetRequiredService<IAppEventRepository>();
             await events.AddAsync(new AppEvent
             {
-                Type      = AppEventType.SessionPaused,
+                Type = AppEventType.SessionPaused,
                 SessionId = _activeSession?.Id,
-                Details   = $"PausedAt={DateTimeOffset.UtcNow:O}"
+                Details = $"PausedAt={DateTimeOffset.UtcNow:O}"
             }, ct);
 
             if (_activeSession is not null)
             {
                 _activeSession.LifecycleState = SessionLifecycleState.Paused;
-                _activeSession.UpdatedAt      = DateTimeOffset.UtcNow;
+                _activeSession.UpdatedAt = DateTimeOffset.UtcNow;
                 await sessions.UpdateAsync(_activeSession, ct);
             }
 
             _sessionEventCount++;
             await TransitionAsync(SessionLifecycleState.Paused, _activeSession, ct);
             _appState.PauseListening();
-
-            _logger.LogInformation("Session paused. Id={Id}", _activeSession?.Id);
         }
         finally { _gate.Release(); }
     }
@@ -266,37 +227,29 @@ internal sealed class SessionCoordinatorService
         await _gate.WaitAsync(ct);
         try
         {
-            if (_state is not SessionLifecycleState.Paused)
-            {
-                _logger.LogWarning("ResumeSession called in state '{State}' — ignored.", _state);
-                return;
-            }
-
+            if (_state is not SessionLifecycleState.Paused) return;
             _pipeline?.Resume();
 
             await using var scope = _scopeFactory.CreateAsyncScope();
             var sessions = scope.ServiceProvider.GetRequiredService<ISessionRepository>();
-            var events   = scope.ServiceProvider.GetRequiredService<IAppEventRepository>();
-
+            var events = scope.ServiceProvider.GetRequiredService<IAppEventRepository>();
             await events.AddAsync(new AppEvent
             {
-                Type      = AppEventType.SessionResumed,
+                Type = AppEventType.SessionResumed,
                 SessionId = _activeSession?.Id,
-                Details   = $"ResumedAt={DateTimeOffset.UtcNow:O}"
+                Details = $"ResumedAt={DateTimeOffset.UtcNow:O}"
             }, ct);
 
             if (_activeSession is not null)
             {
                 _activeSession.LifecycleState = SessionLifecycleState.Listening;
-                _activeSession.UpdatedAt      = DateTimeOffset.UtcNow;
+                _activeSession.UpdatedAt = DateTimeOffset.UtcNow;
                 await sessions.UpdateAsync(_activeSession, ct);
             }
 
             _sessionEventCount++;
             await TransitionAsync(SessionLifecycleState.Listening, _activeSession, ct);
             _appState.StartListening();
-
-            _logger.LogInformation("Session resumed. Id={Id}", _activeSession?.Id);
         }
         finally { _gate.Release(); }
     }
@@ -306,51 +259,39 @@ internal sealed class SessionCoordinatorService
         await _gate.WaitAsync(ct);
         try
         {
-            if (_state is SessionLifecycleState.Idle or SessionLifecycleState.Completed)
-            {
-                _logger.LogWarning("StopSession called in state '{State}' — ignored.", _state);
-                return;
-            }
-
+            if (_state is SessionLifecycleState.Idle or SessionLifecycleState.Completed) return;
             var session = _activeSession;
-
             await TransitionAsync(SessionLifecycleState.Stopping, session, ct);
             _appState.StopListening();
-
             await StopPipelineAsync(ct);
 
             if (session is not null)
             {
-                session.EndedAt        = DateTimeOffset.UtcNow;
-                session.UpdatedAt      = DateTimeOffset.UtcNow;
+                session.EndedAt = DateTimeOffset.UtcNow;
+                session.UpdatedAt = DateTimeOffset.UtcNow;
                 session.LifecycleState = SessionLifecycleState.Completed;
 
                 await using var scope = _scopeFactory.CreateAsyncScope();
                 var sessions = scope.ServiceProvider.GetRequiredService<ISessionRepository>();
-                var events   = scope.ServiceProvider.GetRequiredService<IAppEventRepository>();
-
+                var events = scope.ServiceProvider.GetRequiredService<IAppEventRepository>();
                 await sessions.UpdateAsync(session, ct);
                 await events.AddAsync(new AppEvent
                 {
-                    Type      = AppEventType.SessionEnded,
+                    Type = AppEventType.SessionEnded,
                     SessionId = session.Id,
-                    Details   = $"Duration={session.Duration?.Duration.TotalSeconds:F1}s Events={_sessionEventCount} Segments={_transcriptSegmentCount}"
+                    Details = $"Duration={session.Duration?.Duration.TotalSeconds:F1}s Events={_sessionEventCount} Segments={_transcriptSegmentCount}"
                 }, ct);
 
                 _logger.LogInformation(
-                    "Session ended. Id={Id} Duration={Duration:F1}s Events={Events} Segments={Segments}",
-                    session.Id,
-                    session.Duration?.Duration.TotalSeconds ?? 0d,
-                    _sessionEventCount,
-                    _transcriptSegmentCount);
+                    "[Audio.Session.Stop] sessionId={SessionId} durationSec={Duration:F1} segments={Segments}",
+                    session.Id, session.Duration?.Duration.TotalSeconds ?? 0d, _transcriptSegmentCount);
             }
 
-            _activeSession          = null;
-            _sessionEventCount      = 0;
+            _activeSession = null;
+            _sessionEventCount = 0;
             _transcriptSegmentCount = 0;
-            _audioStatus            = AudioStatusSnapshot.Idle;
+            _audioStatus = AudioStatusSnapshot.Idle;
             AudioStatusChanged?.Invoke(this, _audioStatus);
-
             await TransitionAsync(SessionLifecycleState.Completed, session, ct);
             await TransitionAsync(SessionLifecycleState.Idle, null, ct);
         }
@@ -359,156 +300,126 @@ internal sealed class SessionCoordinatorService
 
     public async Task IngestTranscriptSegmentAsync(TranscriptSegment segment, CancellationToken ct = default)
     {
-        if (_activeSession is null || _state is not SessionLifecycleState.Listening)
-        {
-            _logger.LogWarning("IngestTranscriptSegment called with no active listening session — dropped.");
-            return;
-        }
-
+        if (_activeSession is null || _state is not SessionLifecycleState.Listening) return;
         segment.SessionId = _activeSession.Id;
-
         await using var scope = _scopeFactory.CreateAsyncScope();
         var repo = scope.ServiceProvider.GetRequiredService<ITranscriptRepository>();
         await repo.AddAsync(segment, ct);
-
-        _logger.LogDebug(
-            "Transcript segment ingested. SessionId={SessionId} Speaker={Speaker} Chars={Chars}",
-            _activeSession.Id, segment.SpeakerType, segment.Text.Length);
     }
 
     public async Task IngestScreenshotMetadataAsync(ScreenshotArtifact artifact, CancellationToken ct = default)
     {
-        if (_activeSession is null || _state is not SessionLifecycleState.Listening)
-        {
-            _logger.LogWarning("IngestScreenshotMetadata called with no active listening session — dropped.");
-            return;
-        }
-
+        if (_activeSession is null || _state is not SessionLifecycleState.Listening) return;
         artifact.SessionId = _activeSession.Id;
-
         await using var scope = _scopeFactory.CreateAsyncScope();
         var repo = scope.ServiceProvider.GetRequiredService<IScreenshotRepository>();
         await repo.AddAsync(artifact, ct);
-
-        _logger.LogDebug(
-            "Screenshot metadata ingested. SessionId={SessionId} File={File}",
-            _activeSession.Id, artifact.FilePath);
     }
 
     public async Task RecordAppEventAsync(AppEvent appEvent, CancellationToken ct = default)
     {
         appEvent.SessionId ??= _activeSession?.Id;
-
         await using var scope = _scopeFactory.CreateAsyncScope();
         var repo = scope.ServiceProvider.GetRequiredService<IAppEventRepository>();
         await repo.AddAsync(appEvent, ct);
-
         _sessionEventCount++;
-
-        _logger.LogDebug("AppEvent recorded. Type={Type} SessionId={SessionId}",
-            appEvent.Type, appEvent.SessionId);
     }
 
-    private async Task StartPipelineAsync(Guid sessionId)
+    private async Task StartPipelineAsync(Guid sessionId, ListeningMode mode)
     {
-        _logger.LogInformation("[Pipeline.Start] Acquiring pipeline scope for SessionId={Id}", sessionId);
-        var discoveredMicDevice = default(Argus.Audio.Devices.AudioDeviceInfo);
-        var discoveredOutputDevice = default(Argus.Audio.Devices.AudioDeviceInfo);
+        var wantsMic = mode is ListeningMode.Microphone or ListeningMode.MicrophoneAndSystem;
+        var wantsSystem = mode is ListeningMode.SystemAudio or ListeningMode.MicrophoneAndSystem;
+
+        _logger.LogInformation(
+            "[Pipeline.CapturePlan] sessionId={SessionId} mode={Mode} microphone={Microphone} systemAudio={SystemAudio}",
+            sessionId, mode, wantsMic, wantsSystem);
+
+        AudioDeviceInfo? discoveredMicDevice = null;
+        AudioDeviceInfo? discoveredOutputDevice = null;
 
         try
         {
-            if (_deviceDiscovery is Argus.Audio.Devices.WindowsAudioDeviceDiscovery winDisc)
+            if (_deviceDiscovery is WindowsAudioDeviceDiscovery winDisc)
                 winDisc.LogAllEndpoints();
 
-            var micDevice    = _deviceDiscovery.GetDefaultInputDevice();
-            var outputDevice = _deviceDiscovery.GetDefaultOutputDevice();
-            discoveredMicDevice = micDevice;
-            discoveredOutputDevice = outputDevice;
+            discoveredMicDevice = wantsMic ? _deviceDiscovery.GetDefaultInputDevice() : null;
+            discoveredOutputDevice = wantsSystem ? _deviceDiscovery.GetDefaultOutputDevice() : null;
 
-            if (micDevice is null)
-            {
-                _logger.LogWarning("[Pipeline.Start] No microphone found — audio capture skipped.");
-                _audioStatus = new AudioStatusSnapshot
-                {
-                    MicrophoneStatus  = AudioCaptureStatus.NoDevice,
-                    SystemAudioStatus = AudioCaptureStatus.NoDevice
-                };
-                AudioStatusChanged?.Invoke(this, _audioStatus);
-                return;
-            }
+            if (wantsMic && discoveredMicDevice is null)
+                _logger.LogWarning("[Pipeline.CapturePlan] sessionId={SessionId} source=Microphone requested=true available=false", sessionId);
+            if (wantsSystem && discoveredOutputDevice is null)
+                _logger.LogWarning("[Pipeline.CapturePlan] sessionId={SessionId} source=SystemAudio requested=true available=false", sessionId);
 
-            _logger.LogInformation(
-                "[Pipeline.Start] Devices: mic='{Mic}' output='{Output}' captureMode=MicrophoneAndSystem",
-                micDevice.Name, outputDevice?.Name ?? "none");
+            if ((wantsMic && discoveredMicDevice is null) && (wantsSystem && discoveredOutputDevice is null))
+                throw new InvalidOperationException("No requested audio capture devices are available.");
 
             _pipelineScope = _scopeFactory.CreateAsyncScope();
             var sp = _pipelineScope.Value.ServiceProvider;
-
-            _logger.LogInformation("[Pipeline.Start] Resolving capture sources from long-lived scope.");
-
-            var micSource = sp.GetRequiredService<MicrophoneCaptureSource>();
-
             using var enumerator = new NAudio.CoreAudioApi.MMDeviceEnumerator();
-            var mmMic = enumerator.GetDevice(micDevice.Id);
-            micSource.SetDevice(mmMic);
 
-            micSource.SelectedBackend    = _micSettings.Backend;
-            micSource.WaveInDeviceNumber = _micSettings.WaveInDeviceNumber;
-            micSource.WasapiContCapture  = _micSettings.Backend is MicBackend.Wasapi or MicBackend.Auto;
-            micSource.SetChunkDuration(TimeSpan.FromMilliseconds(_runtimeSettings.SherpaChunkDurationMs));
+            MicrophoneCaptureSource? micSource = null;
+            if (wantsMic && discoveredMicDevice is not null)
+            {
+                micSource = sp.GetRequiredService<MicrophoneCaptureSource>();
+                using var mmMic = enumerator.GetDevice(discoveredMicDevice.Id);
+                micSource.SetDevice(mmMic);
+                micSource.SelectedBackend = _micSettings.Backend;
+                micSource.WaveInDeviceNumber = _micSettings.WaveInDeviceNumber;
+                micSource.WasapiContCapture = _micSettings.Backend is MicBackend.Wasapi or MicBackend.Auto;
+                micSource.SetChunkDuration(TimeSpan.FromMilliseconds(_runtimeSettings.SherpaChunkDurationMs));
 
-            _logger.LogInformation(
-                "[Pipeline.Start] MicrophoneCaptureSource configured: '{Device}' RequestedBackend={Requested} WaveInDevice={WaveInDevice} ChunkMs={ChunkMs}",
-                micDevice.Name, _micSettings.Backend, _micSettings.WaveInDeviceNumber, _runtimeSettings.SherpaChunkDurationMs);
+                _logger.LogInformation(
+                    "[Mic.StartPlan] sessionId={SessionId} requestedBackend={Backend} waveInDevice={WaveInDevice} device='{Device}' chunkMs={ChunkMs}",
+                    sessionId, _micSettings.Backend, _micSettings.WaveInDeviceNumber,
+                    discoveredMicDevice.Name, _runtimeSettings.SherpaChunkDurationMs);
+            }
 
             SystemAudioCaptureSource? sysSource = null;
-            if (outputDevice is not null)
+            if (wantsSystem && discoveredOutputDevice is not null)
             {
                 sysSource = sp.GetRequiredService<SystemAudioCaptureSource>();
-                var mmOutput = enumerator.GetDevice(outputDevice.Id);
+                using var mmOutput = enumerator.GetDevice(discoveredOutputDevice.Id);
                 sysSource.SetDevice(mmOutput);
+                sysSource.SetChunkDuration(TimeSpan.FromMilliseconds(_runtimeSettings.SherpaChunkDurationMs));
+
                 _logger.LogInformation(
-                    "[Pipeline.Start] SystemAudioCaptureSource configured and ENABLED: '{Device}'",
-                    outputDevice.Name);
-            }
-            else
-            {
-                _logger.LogWarning("[Pipeline.Start] No output device found — continuing with microphone only.");
+                    "[SystemAudio.StartPlan] sessionId={SessionId} device='{Device}' chunkMs={ChunkMs}",
+                    sessionId, discoveredOutputDevice.Name, _runtimeSettings.SherpaChunkDurationMs);
             }
 
             _pipelineStoppingCts?.Dispose();
             _pipelineStoppingCts = new CancellationTokenSource();
-            _logger.LogInformation("[Pipeline.Start] Pipeline stopping CTS created (not linked to any external token).");
 
             var pipeline = sp.GetRequiredService<ITranscriptionPipeline>();
-            if (pipeline is Argus.Transcription.Pipeline.TranscriptionPipeline concrete)
+            if (pipeline is TranscriptionPipeline concrete)
             {
                 concrete.SetSources(micSource, sysSource);
                 concrete.SkipSystemAudioCapture = false;
             }
 
             _pipeline = pipeline;
-            _pipeline.StatusChanged    += OnPipelineStatusChanged;
+            _pipeline.StatusChanged += OnPipelineStatusChanged;
             _pipeline.SegmentsProduced += OnSegmentsProduced;
 
-            _logger.LogInformation("[Pipeline.Start] Calling pipeline.StartAsync for SessionId={Id}", sessionId);
             if (_sherpaProvisioning.State is SherpaModelProvisioningState.Provisioning or SherpaModelProvisioningState.Error
                 || !_sherpaPreflight.IsSafeToUse)
             {
+                var error = _sherpaProvisioning.State is SherpaModelProvisioningState.Provisioning or SherpaModelProvisioningState.Error
+                    ? _sherpaProvisioning.LastError ?? "Provisioning Sherpa model..."
+                    : _sherpaPreflight.LastError ?? "Sherpa model loaded but failed native preflight.";
+
                 _audioStatus = new AudioStatusSnapshot
                 {
-                    MicrophoneStatus = AudioCaptureStatus.Capturing,
-                    MicrophoneDevice = micDevice.Name,
-                    SystemAudioStatus = outputDevice is null ? AudioCaptureStatus.NoDevice : AudioCaptureStatus.Idle,
-                    SystemAudioDevice = outputDevice?.Name ?? string.Empty,
+                    MicrophoneStatus = micSource is null ? AudioCaptureStatus.NoDevice : AudioCaptureStatus.Idle,
+                    MicrophoneDevice = discoveredMicDevice?.Name ?? string.Empty,
+                    SystemAudioStatus = sysSource is null ? AudioCaptureStatus.NoDevice : AudioCaptureStatus.Idle,
+                    SystemAudioDevice = discoveredOutputDevice?.Name ?? string.Empty,
                     TranscriptionStatus = TranscriptionPipelineStatus.Error,
                     TranscriptionConfigured = true,
                     TranscriptionProvider = "SherpaOnnx",
                     TranscriptionModel = SherpaOnnxModelService.DefaultModelId,
-                    TranscriptionError = _sherpaProvisioning.State is SherpaModelProvisioningState.Provisioning or SherpaModelProvisioningState.Error
-                        ? _sherpaProvisioning.LastError ?? "Provisioning Sherpa model..."
-                        : _sherpaPreflight.LastError ?? "Sherpa model loaded but failed native preflight.",
-                    TranscriptionLanguageMode = "forced/es",
+                    TranscriptionError = error,
+                    TranscriptionLanguageMode = "requested/es actual/unknown",
                     SherpaProvisioningState = _sherpaProvisioning.State,
                     SherpaModelRoot = _sherpaProvisioning.ModelRoot,
                     SherpaNativeReadinessState = _sherpaPreflight.State
@@ -518,28 +429,37 @@ internal sealed class SessionCoordinatorService
             }
 
             await _pipeline.StartAsync(sessionId, _pipelineStoppingCts.Token);
-            _logger.LogInformation("[Pipeline.Start] pipeline.StartAsync returned. Microphone and system loopback capture are active when devices are available.");
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "[Pipeline.Start] Failed to start transcription pipeline — session continues without audio.");
+            _logger.LogError(ex,
+                "[Pipeline.Start] sessionId={SessionId} mode={Mode} failed=true",
+                sessionId, mode);
+
             _audioStatus = new AudioStatusSnapshot
             {
-                MicrophoneStatus = discoveredMicDevice is null ? AudioCaptureStatus.NoDevice : AudioCaptureStatus.Capturing,
+                MicrophoneStatus = wantsMic
+                    ? discoveredMicDevice is null ? AudioCaptureStatus.NoDevice : AudioCaptureStatus.DeviceError
+                    : AudioCaptureStatus.NoDevice,
                 MicrophoneDevice = discoveredMicDevice?.Name ?? string.Empty,
-                SystemAudioStatus = discoveredOutputDevice is null ? AudioCaptureStatus.NoDevice : AudioCaptureStatus.Idle,
+                MicrophoneError = wantsMic ? ex.Message : null,
+                SystemAudioStatus = wantsSystem
+                    ? discoveredOutputDevice is null ? AudioCaptureStatus.NoDevice : AudioCaptureStatus.DeviceError
+                    : AudioCaptureStatus.NoDevice,
                 SystemAudioDevice = discoveredOutputDevice?.Name ?? string.Empty,
+                SystemAudioError = wantsSystem ? ex.Message : null,
                 TranscriptionStatus = TranscriptionPipelineStatus.Error,
                 TranscriptionConfigured = true,
                 TranscriptionProvider = "SherpaOnnx",
                 TranscriptionModel = SherpaOnnxModelService.DefaultModelId,
                 TranscriptionError = ex.Message,
-                TranscriptionLanguageMode = "forced/es",
+                TranscriptionLanguageMode = "requested/es actual/unknown",
                 SherpaProvisioningState = _sherpaProvisioning.State,
                 SherpaModelRoot = _sherpaProvisioning.ModelRoot,
                 SherpaNativeReadinessState = _sherpaPreflight.State
             };
             AudioStatusChanged?.Invoke(this, _audioStatus);
+
             if (_pipelineScope is { } failedScope)
                 await failedScope.DisposeAsync();
             _pipelineScope = null;
@@ -551,53 +471,42 @@ internal sealed class SessionCoordinatorService
 
     private async Task StopPipelineAsync(CancellationToken ct)
     {
-        if (_pipeline is null)
-        {
-            _logger.LogDebug("[Pipeline.Stop] StopPipelineAsync called but pipeline is null — nothing to stop.");
-            return;
-        }
+        if (_pipeline is null) return;
 
-        _logger.LogInformation("[Pipeline.Stop] Signalling pipeline stopping CTS.");
         try { _pipelineStoppingCts?.Cancel(); }
         catch (ObjectDisposedException) { }
 
-        _pipeline.StatusChanged    -= OnPipelineStatusChanged;
+        _pipeline.StatusChanged -= OnPipelineStatusChanged;
         _pipeline.SegmentsProduced -= OnSegmentsProduced;
 
-        try
-        {
-            _logger.LogInformation("[Pipeline.Stop] Calling pipeline.StopAsync.");
-            await _pipeline.StopAsync(ct);
-            _logger.LogInformation("[Pipeline.Stop] pipeline.StopAsync completed.");
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "[Pipeline.Stop] Error stopping transcription pipeline.");
-        }
+        try { await _pipeline.StopAsync(ct); }
+        catch (Exception ex) { _logger.LogWarning(ex, "[Pipeline.Stop] failed_nonfatal=true"); }
         finally
         {
             if (_pipeline is IAsyncDisposable ad)
             {
                 try { await ad.DisposeAsync(); }
-                catch (Exception ex) { _logger.LogWarning(ex, "[Pipeline.Stop] Error disposing pipeline."); }
+                catch (Exception ex) { _logger.LogWarning(ex, "[Pipeline.Dispose] failed_nonfatal=true"); }
             }
             _pipeline = null;
 
-            _logger.LogInformation("[Pipeline.Stop] Disposing pipeline scope (capture sources will be disposed now).");
             if (_pipelineScope is { } pipelineScope)
                 await pipelineScope.DisposeAsync();
             _pipelineScope = null;
 
             _pipelineStoppingCts?.Dispose();
             _pipelineStoppingCts = null;
-
-            _logger.LogInformation("[Pipeline.Stop] Pipeline scope and stopping CTS disposed.");
         }
     }
 
     private void OnPipelineStatusChanged(object? sender, AudioStatusSnapshot status)
     {
         _audioStatus = status;
+        _logger.LogDebug(
+            "[UI.AudioStatus] sessionId={SessionId} micStatus={MicStatus} micRms={MicRms:F6} systemStatus={SystemStatus} systemRms={SystemRms:F6} txStatus={TxStatus} queue={Queue}",
+            _activeSession?.Id, status.MicrophoneStatus, status.MicConvertedRms,
+            status.SystemAudioStatus, status.SystemAudioConvertedRms,
+            status.TranscriptionStatus, status.PendingChunks);
         AudioStatusChanged?.Invoke(this, status);
     }
 
@@ -606,34 +515,19 @@ internal sealed class SessionCoordinatorService
         if (_activeSession is null) return;
 
         var meaningfulSegments = TranscriptTextFilter.FilterMeaningfulSegments(segments);
-        if (meaningfulSegments.Count == 0)
-        {
-            _logger.LogDebug("[UIBridge] Dropping junk-only transcript batch before UI/buffer publishing.");
-            return;
-        }
+        if (meaningfulSegments.Count == 0) return;
 
         _transcriptSegmentCount += meaningfulSegments.Count;
-
-        _logger.LogInformation(
-            "[UIBridge] Re-raising transcript segments to UI. Count={Count} First='{First}'",
-            meaningfulSegments.Count,
-            meaningfulSegments.Count > 0
-                ? (meaningfulSegments[0].Text.Length > 120 ? meaningfulSegments[0].Text[..120] + "…" : meaningfulSegments[0].Text)
-                : string.Empty);
-
         _transcriptBuffer.Push(meaningfulSegments);
         var recentText = _transcriptBuffer.GetRecentText(10);
-        var intent     = _intentDetector.Detect(meaningfulSegments);
-        var assistantTriggered = intent.HasIntent;
+        var intent = _intentDetector.Detect(meaningfulSegments);
 
-        var newestSegmentAt = meaningfulSegments.Max(segment => segment.CreatedAt);
-        var newestSegmentAgeMs = Math.Max(0, (DateTimeOffset.UtcNow - newestSegmentAt).TotalMilliseconds);
         _logger.LogInformation(
-            "[UiBridgeLatency] segments={Count} newestSegmentAgeMs={AgeMs:F1} intent={Intent} assistantTriggered={Triggered}",
+            "[Transcript.Batch] sessionId={SessionId} count={Count} speakerTypes={SpeakerTypes} intent={Intent}",
+            _activeSession.Id,
             meaningfulSegments.Count,
-            newestSegmentAgeMs,
-            intent.Intent,
-            assistantTriggered);
+            string.Join(',', meaningfulSegments.Select(s => s.SpeakerType).Distinct()),
+            intent.Intent);
 
         if (intent.HasIntent)
             _assistantReaction.OnIntentDetected(intent, recentText);
@@ -660,39 +554,33 @@ internal sealed class SessionCoordinatorService
     private void OnActiveWindowChanged(object? sender, ActiveWindowChangedEventArgs e)
     {
         _activeProcessName = e.Current.ProcessName;
-        _activeWindowTitle  = e.Current.WindowTitle;
-        _activeProcessId   = e.Current.ProcessId;
+        _activeWindowTitle = e.Current.WindowTitle;
+        _activeProcessId = e.Current.ProcessId;
 
         if (_state == SessionLifecycleState.Listening && _activeSession is not null)
         {
-            var appEvent = new AppEvent
+            _ = RecordAppEventAsync(new AppEvent
             {
-                Type      = AppEventType.ActiveWindowChanged,
+                Type = AppEventType.ActiveWindowChanged,
                 SessionId = _activeSession.Id,
-                Details   = $"App={e.Current.ProcessName} PID={e.Current.ProcessId} Title={e.Current.WindowTitle}"
-            };
-            _ = RecordAppEventAsync(appEvent);
+                Details = $"App={e.Current.ProcessName} PID={e.Current.ProcessId} Title={e.Current.WindowTitle}"
+            });
         }
 
         PublishSnapshot();
     }
 
-    private Task TransitionAsync(
-        SessionLifecycleState next, Session? session, CancellationToken ct)
+    private Task TransitionAsync(SessionLifecycleState next, Session? session, CancellationToken ct)
     {
         var previous = _state;
         _state = next;
         _appState.SyncLifecycleState(next);
-
-        _logger.LogDebug("SessionLifecycle {Prev} → {Next}", previous, next);
-
         SessionStateChanged?.Invoke(this, new SessionStateChangedEventArgs
         {
             PreviousState = previous,
-            NewState      = next,
-            Session       = session
+            NewState = next,
+            Session = session
         });
-
         PublishSnapshot();
         return Task.CompletedTask;
     }
@@ -701,17 +589,16 @@ internal sealed class SessionCoordinatorService
     {
         var snap = new SessionStateSnapshot
         {
-            LifecycleState          = _state,
-            SessionId               = _activeSession?.Id,
-            SessionTitle            = _activeSession?.Title,
-            SessionStartedAt        = _activeSession?.StartedAt,
-            AppEventCount           = _sessionEventCount,
-            TranscriptSegmentCount  = _transcriptSegmentCount,
-            ActiveProcessName       = _activeProcessName,
-            ActiveProcessId         = _activeProcessId,
-            ActiveWindowTitle       = _activeWindowTitle
+            LifecycleState = _state,
+            SessionId = _activeSession?.Id,
+            SessionTitle = _activeSession?.Title,
+            SessionStartedAt = _activeSession?.StartedAt,
+            AppEventCount = _sessionEventCount,
+            TranscriptSegmentCount = _transcriptSegmentCount,
+            ActiveProcessName = _activeProcessName,
+            ActiveProcessId = _activeProcessId,
+            ActiveWindowTitle = _activeWindowTitle
         };
-
         _snapshot = snap;
         SnapshotChanged?.Invoke(this, snap);
     }
@@ -722,28 +609,7 @@ internal sealed class SessionCoordinatorService
         {
             case AppMode.Listening when _state == SessionLifecycleState.Idle:
                 if (!_sherpaProvisioning.IsReady || !_sherpaPreflight.IsSafeToUse)
-                {
-                    var reason = !_sherpaProvisioning.IsReady
-                        ? _sherpaProvisioning.LastError ?? $"Provisioning Sherpa model... State={_sherpaProvisioning.State}. Root={_sherpaProvisioning.ModelRoot}"
-                        : _sherpaPreflight.LastError ?? "Sherpa model loaded but failed native preflight.";
-
-                    _audioStatus = new AudioStatusSnapshot
-                    {
-                        TranscriptionStatus = TranscriptionPipelineStatus.Error,
-                        TranscriptionConfigured = true,
-                        TranscriptionProvider = "SherpaOnnx",
-                        TranscriptionModel = SherpaOnnxModelService.DefaultModelId,
-                        TranscriptionError = reason,
-                        TranscriptionLanguageMode = "forced/es",
-                        SherpaProvisioningState = _sherpaProvisioning.State,
-                        SherpaModelRoot = _sherpaProvisioning.ModelRoot,
-                        SherpaNativeReadinessState = _sherpaPreflight.State
-                    };
-                    AudioStatusChanged?.Invoke(this, _audioStatus);
-                    _logger.LogWarning("[SherpaBootstrapGate] blocked_start reason={Reason}", reason);
                     break;
-                }
-
                 _ = StartSessionAsync($"Session {DateTimeOffset.Now:yyyy-MM-dd HH:mm}");
                 break;
             case AppMode.Listening when _state == SessionLifecycleState.Paused:
