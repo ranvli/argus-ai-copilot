@@ -7,73 +7,35 @@ public sealed class AudioStatusSnapshot
 {
     public static readonly AudioStatusSnapshot Idle = new();
 
-    // ── Microphone ────────────────────────────────────────────────────────────
-
     public AudioCaptureStatus MicrophoneStatus  { get; init; } = AudioCaptureStatus.Idle;
     public string  MicrophoneDevice             { get; init; } = string.Empty;
     public string? MicrophoneError              { get; init; }
-
-    /// <summary>Which backend is actively capturing microphone audio.</summary>
-    public MicBackend ActiveMicBackend { get; init; } = MicBackend.WaveIn;
-
-    /// <summary>RMS of the most-recent native (pre-conversion) buffer. 0 when idle.</summary>
-    public float MicNativeRms    { get; init; }
-
-    /// <summary>RMS of the most-recent converted PCM16 chunk sent to Whisper. 0 when idle.</summary>
-    public float MicConvertedRms { get; init; }
-
-    // ── System audio ──────────────────────────────────────────────────────────
+    public MicBackend ActiveMicBackend          { get; init; } = MicBackend.WaveIn;
+    public float MicNativeRms                   { get; init; }
+    public float MicConvertedRms                { get; init; }
 
     public AudioCaptureStatus SystemAudioStatus { get; init; } = AudioCaptureStatus.NoDevice;
     public string  SystemAudioDevice            { get; init; } = string.Empty;
     public string? SystemAudioError             { get; init; }
-
-    // ── Transcription ─────────────────────────────────────────────────────────
+    public float SystemAudioNativeRms            { get; init; }
+    public float SystemAudioConvertedRms         { get; init; }
 
     public TranscriptionPipelineStatus TranscriptionStatus { get; init; } = TranscriptionPipelineStatus.Idle;
     public string? TranscriptionError { get; init; }
-
-    /// <summary>Number of audio chunks queued, waiting to be sent to the transcription provider.</summary>
     public int PendingChunks { get; init; }
-
-    /// <summary>Total number of transcript segments produced this session.</summary>
     public int TotalSegments { get; init; }
 
-    // ── Transcription provider diagnostics ───────────────────────────────────
-
-    /// <summary>
-    /// Whether a transcription provider was successfully resolved at pipeline start.
-    /// False means every audio chunk will be dropped — UI should warn the user.
-    /// </summary>
     public bool TranscriptionConfigured { get; init; }
-
-    /// <summary>Provider name used for transcription, e.g. "OpenAI", "WhisperNet".</summary>
     public string TranscriptionProvider { get; init; } = string.Empty;
-
-    /// <summary>Model ID used for transcription, e.g. "base.en".</summary>
     public string TranscriptionModel { get; init; } = string.Empty;
-
-    /// <summary>Human-readable transcription language mode, e.g. forced/es, locked/en, or auto.</summary>
     public string TranscriptionLanguageMode { get; init; } = string.Empty;
-
-    /// <summary>UTC timestamp of the last successfully transcribed chunk.</summary>
     public DateTimeOffset? LastTranscriptionAt { get; init; }
 
-    /// <summary>Download / readiness state of the local Whisper model file.</summary>
     public WhisperModelDownloadState WhisperDownloadState { get; init; } = WhisperModelDownloadState.NotApplicable;
-
-    /// <summary>Full path to the local Whisper GGML model file, or empty when not applicable.</summary>
     public string WhisperModelPath { get; init; } = string.Empty;
-
-    /// <summary>Provisioning/readiness state of the embedded Sherpa model assets.</summary>
     public SherpaModelProvisioningState SherpaProvisioningState { get; init; } = SherpaModelProvisioningState.NotApplicable;
-
-    /// <summary>Resolved root path for Sherpa model assets.</summary>
     public string SherpaModelRoot { get; init; } = string.Empty;
-
     public SherpaNativeReadinessState SherpaNativeReadinessState { get; init; } = SherpaNativeReadinessState.NotChecked;
-
-    // ── Display helpers ───────────────────────────────────────────────────────
 
     public string MicrophoneStatusDisplay => MicrophoneStatus switch
     {
@@ -86,10 +48,6 @@ public sealed class AudioStatusSnapshot
         _                              => "Idle"
     };
 
-    /// <summary>
-    /// A compact level meter string for the UI, e.g. "█████░░░░░  RMS 0.082".
-    /// Returns empty string when not capturing.
-    /// </summary>
     public string MicLevelDisplay
     {
         get
@@ -103,9 +61,6 @@ public sealed class AudioStatusSnapshot
         }
     }
 
-    /// <summary>
-    /// One-line native vs converted RMS summary for debugging.
-    /// </summary>
     public string MicSignalDebugDisplay
     {
         get
@@ -125,6 +80,24 @@ public sealed class AudioStatusSnapshot
         AudioCaptureStatus.NoDevice    => "Not available",
         _                              => "Idle"
     };
+
+    public string SystemAudioLevelDisplay
+    {
+        get
+        {
+            if (SystemAudioStatus != AudioCaptureStatus.Capturing) return string.Empty;
+            var rms    = SystemAudioConvertedRms;
+            var filled = Math.Clamp((int)Math.Round(rms * 50), 0, 10);
+            var bar    = new string('█', filled) + new string('░', 10 - filled);
+            var label  = rms < 0.002f ? "SILENT" : $"RMS {rms:F3}";
+            return $"{bar}  {label}";
+        }
+    }
+
+    public string SystemAudioSignalDebugDisplay =>
+        SystemAudioStatus == AudioCaptureStatus.Capturing
+            ? $"[WASAPI loopback]  native {SystemAudioNativeRms:F4}  →  conv {SystemAudioConvertedRms:F4}"
+            : string.Empty;
 
     public string TranscriptionStatusDisplay => TranscriptionStatus switch
     {
@@ -178,7 +151,6 @@ public sealed class AudioStatusSnapshot
     };
 }
 
-/// <summary>Transcription pipeline operational state.</summary>
 public enum TranscriptionPipelineStatus
 {
     Idle,
@@ -187,18 +159,12 @@ public enum TranscriptionPipelineStatus
     NoProvider
 }
 
-/// <summary>Download / readiness state of a local Whisper GGML model file.</summary>
 public enum WhisperModelDownloadState
 {
-    /// <summary>Not applicable — provider is not WhisperNet.</summary>
     NotApplicable,
-    /// <summary>Model file has not yet been checked.</summary>
     NotChecked,
-    /// <summary>Model file is currently being downloaded.</summary>
     Downloading,
-    /// <summary>Model file is present and the factory is initialised.</summary>
     Ready,
-    /// <summary>Download or initialisation failed.</summary>
     Failed
 }
 
