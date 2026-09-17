@@ -66,52 +66,30 @@ public sealed class WaveInMicrophoneBackend : IDisposable
     private bool                  _startupRawHadSignal;
     private int                   _callbackBoundarySequence;
 
-    // ── Debug-WAV gate state (reset each session) ─────────────────────────────
-    // Saves only on the first occurrence of each failure class — no periodic noise.
     private const int  DebugMaxFiles         = 10;
-    private const long DebugMaxBytes         = 50L * 1024 * 1024; // 50 MB
+    private const long DebugMaxBytes         = 50L * 1024 * 1024;
     private bool            _dbgFirstSilentSaved;
     private bool            _dbgFirstConvFailureSaved;
     private bool            _dbgFirstAllZeroConvSaved;
     private AudioChunkClass _dbgPrevClass = AudioChunkClass.HealthyAudio;
 
-    // ── Per-session log throttle (suppress repeated identical warnings) ────────
     private DateTimeOffset _lastSilentWarnAt = DateTimeOffset.MinValue;
     private DateTimeOffset _lastConvErrAt    = DateTimeOffset.MinValue;
     private bool           _firstSamplesLogged;
     private bool           _firstChunkLogged;
 
-    // ── Diagnostic experiment knobs (set before Start; reset each session) ─────
-    /// <summary>
-    /// Multiplies every PCM16 sample by this factor before chunk emission.
-    /// 1.0 = off. Try 4.0 or 8.0 when Whisper reports BLANK_AUDIO on low-level input.
-    /// Pre-gain and post-gain RMS/Peak are logged on every chunk at Information level
-    /// while this is != 1.0.
-    /// </summary>
     public float DiagGain { get; set; } = 1f;
-
-    /// <summary>
-    /// When true, peak-normalizes the chunk to 90 % full-scale before chunk emission.
-    /// Mutually exclusive with <see cref="DiagGain"/>: if both are set, normalize wins.
-    /// Intended for temporary Whisper acceptance testing only.
-    /// </summary>
     public bool DiagNormalize { get; set; } = false;
 
-    // True when the direct PCM path is active (no resampler); used to suppress the
-    // ConversionDestroyedAudio false-positive that is meaningless on this path.
     private bool _usingDirectPcm;
 
-    // Continuous 5-second capture WAV written straight from OnDataAvailable callbacks
-    // (pre-pipeline, pre-gain) so we can verify what the driver is actually delivering.
     private WaveFileWriter? _contWavWriter;
-    private int             _contWavBytesRemaining;   // counts down to zero then closes
+    private int             _contWavBytesRemaining;
 
-    // ── Diagnostics ───────────────────────────────────────────────────────────
     public float NativeRms    { get; private set; }
     public float NativePeak   { get; private set; }
     public float ConvertedRms { get; private set; }
 
-    // ── Events ────────────────────────────────────────────────────────────────
     public event EventHandler<AudioChunk>? ChunkReady;
     public event EventHandler<NativeCallbackInfo>? NativeCallbackObserved;
 
@@ -128,8 +106,11 @@ public sealed class WaveInMicrophoneBackend : IDisposable
         _logger        = logger;
         _deviceNumber  = deviceNumber;
         _chunkDuration = chunkDuration;
-        _chunkBytes    = TargetSampleRate * TargetChannels * (TargetBitsPerSample / 8)
-                       * (int)chunkDuration.TotalSeconds;
+        _chunkBytes    = Math.Max(1, (int)Math.Round(
+            TargetSampleRate
+            * TargetChannels
+            * (TargetBitsPerSample / 8d)
+            * chunkDuration.TotalSeconds));
         _debugFolder   = debugFolder;
         _debugEnabled  = debugEnabled;
     }
@@ -150,7 +131,6 @@ public sealed class WaveInMicrophoneBackend : IDisposable
         _paused    = false;
         _stopping  = false;
 
-        // Reset per-session debug gate
         _dbgFirstSilentSaved      = false;
         _dbgFirstConvFailureSaved = false;
         _dbgFirstAllZeroConvSaved = false;
@@ -164,7 +144,7 @@ public sealed class WaveInMicrophoneBackend : IDisposable
         _startupRawHadSignal      = false;
         _callbackBoundarySequence = 0;
         _startupBufferedCallbacks.Clear();
-        CloseContWav();   // ensure any stale writer from a prior session is closed
+        CloseContWav();
 
         var preferredFormat = ResolvePreferredInputFormat(_logger, _deviceNumber);
         var requestFormat = RequestedSampleRate == 16_000
@@ -175,8 +155,7 @@ public sealed class WaveInMicrophoneBackend : IDisposable
         _nativeFormat = requestFormat;
 
         _logger.LogInformation(
-            "[WaveInBackend.Open] Backend=WaveIn DeviceIndex={Idx} DeviceName='{Name}' " +
-            "Format={Rate}Hz/{Bits}bit/{Ch}ch SessionId={Id}",
+            "[WaveInBackend.Open] Backend=WaveIn DeviceIndex={Idx} DeviceName='{Name}' Format={Rate}Hz/{Bits}bit/{Ch}ch SessionId={Id}",
             _deviceNumber, DeviceName,
             requestFormat.SampleRate, requestFormat.BitsPerSample, requestFormat.Channels,
             sessionId);
@@ -188,7 +167,6 @@ public sealed class WaveInMicrophoneBackend : IDisposable
             BufferMilliseconds = 50
         };
 
-        // ── Full WaveIn capability dump (all devices, once per session) ──────
         var totalDevices = WaveIn.DeviceCount;
         _logger.LogInformation("[WaveInBackend] WaveIn device count: {Count}", totalDevices);
         for (int di = 0; di < totalDevices; di++)
@@ -197,8 +175,7 @@ public sealed class WaveInMicrophoneBackend : IDisposable
             {
                 var c = WaveIn.GetCapabilities(di);
                 _logger.LogInformation(
-                    "[WaveInBackend]   WaveIn[{Idx}] '{Name}'  Channels={Ch}  " +
-                    "ManufacturerGuid={Mfr}  ProductGuid={Prod}",
+                    "[WaveInBackend]   WaveIn[{Idx}] '{Name}' Channels={Ch} ManufacturerGuid={Mfr} ProductGuid={Prod}",
                     di, c.ProductName, c.Channels, c.ManufacturerGuid, c.ProductGuid);
             }
             catch (Exception ex)
@@ -226,7 +203,6 @@ public sealed class WaveInMicrophoneBackend : IDisposable
             {
                 _pcm16Provider  = _captureBuffer;
                 _usingDirectPcm = true;
-
                 _logger.LogInformation(
                     "[WaveInBackend] Direct PCM path enabled: native format already matches target {Rate}Hz/16bit/1ch",
                     TargetSampleRate);
@@ -302,6 +278,7 @@ public sealed class WaveInMicrophoneBackend : IDisposable
 
     public void Pause()  { _paused = true;  }
     public void Resume() { _paused = false; }
+
     public void ReleaseStartupBufferedAudio()
     {
         lock (_pipelineLock)
@@ -312,8 +289,6 @@ public sealed class WaveInMicrophoneBackend : IDisposable
             FlushStartupBufferedCallbacksLocked();
         }
     }
-
-    // ── Internal callbacks ────────────────────────────────────────────────────
 
     private void OnDataAvailable(object? sender, WaveInEventArgs e)
     {
@@ -337,8 +312,7 @@ public sealed class WaveInMicrophoneBackend : IDisposable
                 NativePeak = peak;
 
                 _logger.LogDebug(
-                    "[WaveInNative] Device='{D}' Bytes={B} RMS={R:F4} Peak={P:F4} " +
-                    "Min={Min:F4} Max={Max:F4} Zeros={Z:P0}",
+                    "[WaveInNative] Device='{D}' Bytes={B} RMS={R:F4} Peak={P:F4} Min={Min:F4} Max={Max:F4} Zeros={Z:P0}",
                     DeviceName, e.BytesRecorded, rms, peak, min, max, zeroRatio);
 
                 callbackInfo = new NativeCallbackInfo
@@ -361,8 +335,7 @@ public sealed class WaveInMicrophoneBackend : IDisposable
                         sb.Append($"{s} ");
                     }
                     _logger.LogInformation(
-                        "[WaveInNative] First {N} samples (session start): [{Samples}]  " +
-                        "Bytes={Bytes} RMS={Rms:F4}",
+                        "[WaveInNative] First {N} samples (session start): [{Samples}] Bytes={Bytes} RMS={Rms:F4}",
                         sampleCount, sb.ToString().TrimEnd(), e.BytesRecorded, rms);
                 }
 
@@ -373,9 +346,7 @@ public sealed class WaveInMicrophoneBackend : IDisposable
                     {
                         _lastSilentWarnAt = now;
                         _logger.LogWarning(
-                            "[WaveInNative] ALL-ZERO buffer — device '{D}' index={Idx} is delivering no audio. " +
-                            "Possible causes: wrong device index, device not selected as Windows default, " +
-                            "or exclusive mode held by another app.",
+                            "[WaveInNative] ALL-ZERO buffer — device '{D}' index={Idx} is delivering no audio. Possible causes: wrong device index, device not selected as Windows default, or exclusive mode held by another app.",
                             DeviceName, _deviceNumber);
                     }
                 }
@@ -471,7 +442,8 @@ public sealed class WaveInMicrophoneBackend : IDisposable
             TryEmitChunk();
         }
         return totalRead;
-    } 
+    }
+
     private void TryEmitChunk()
     {
         while (_pcmBuffer.Length >= _chunkBytes)
@@ -505,10 +477,8 @@ public sealed class WaveInMicrophoneBackend : IDisposable
         var preRms  = AudioChunkDiagnostics.ComputeRms(data);
         var prePeak = AudioChunkDiagnostics.ComputePeak(data);
 
-        // ── Diagnostic gain / normalize (experimental — leave at defaults for normal use) ──
         if (DiagNormalize && prePeak > 0.001f)
         {
-            // Peak-normalize to 90 % full-scale.
             var scale = (short.MaxValue * 0.9f) / (prePeak * short.MaxValue);
             ApplyGainInPlace(data, scale);
         }
@@ -522,12 +492,10 @@ public sealed class WaveInMicrophoneBackend : IDisposable
         var (convMin, convMax, convZeroRatio) = AudioChunkDiagnostics.ComputeMinMaxZero(data);
         ConvertedRms = convRms;
 
-        // Log pre/post whenever gain is active so the effect is always visible.
         if (DiagNormalize || DiagGain != 1f)
         {
             _logger.LogDebug(
-                "[WaveInGain] Device='{D}' PreRMS={PR:F4} PrePeak={PP:F4} → " +
-                "PostRMS={CR:F4} PostPeak={CP:F4}  Mode={Mode}",
+                "[WaveInGain] Device='{D}' PreRMS={PR:F4} PrePeak={PP:F4} → PostRMS={CR:F4} PostPeak={CP:F4} Mode={Mode}",
                 DeviceName, preRms, prePeak, convRms, convPeak,
                 DiagNormalize ? "Normalize" : $"Gain×{DiagGain:F1}");
         }
@@ -544,8 +512,7 @@ public sealed class WaveInMicrophoneBackend : IDisposable
 
             _firstChunkLogged = true;
             _logger.LogInformation(
-                "[WaveInChunk] FIRST CHUNK emitted. Device='{D}' Duration={Dur:F2}s Bytes={B} " +
-                "NativeRMS={NR:F4} NativePeak={NP:F4} ConvRMS={CR:F4} ConvPeak={CP:F4} CLASS={Class}",
+                "[WaveInChunk] FIRST CHUNK emitted. Device='{D}' Duration={Dur:F2}s Bytes={B} NativeRMS={NR:F4} NativePeak={NP:F4} ConvRMS={CR:F4} ConvPeak={CP:F4} CLASS={Class}",
                 DeviceName, duration.TotalSeconds, data.Length,
                 NativeRms, NativePeak, convRms, convPeak, classification);
         }
@@ -557,18 +524,13 @@ public sealed class WaveInMicrophoneBackend : IDisposable
             {
                 _lastConvErrAt = now;
                 _logger.LogError(
-                    "[WaveInChunk] ConversionDestroyedAudio suspected — native peak={NP:F4}, native rms={NR:F4}, " +
-                    "but converted peak={CP:F4}, converted rms={CR:F4}. " +
-                    "WaveIn conversion chain is destroying real signal.",
+                    "[WaveInChunk] ConversionDestroyedAudio suspected — native peak={NP:F4}, native rms={NR:F4}, but converted peak={CP:F4}, converted rms={CR:F4}. WaveIn conversion chain is destroying real signal.",
                     NativePeak, NativeRms, convPeak, convRms);
             }
         }
 
         _logger.LogDebug(
-            "[WaveInChunk] Device='{D}' Duration={Dur:F2}s Bytes={B} " +
-            "NativeRMS={NR:F4} | " +
-            "ConvRMS={CR:F4} ConvPeak={CP:F4} ConvMin={CMin:F4} ConvMax={CMax:F4} ConvZeros={CZ:P0} | " +
-            "CLASS={Class}",
+            "[WaveInChunk] Device='{D}' Duration={Dur:F2}s Bytes={B} NativeRMS={NR:F4} | ConvRMS={CR:F4} ConvPeak={CP:F4} ConvMin={CMin:F4} ConvMax={CMax:F4} ConvZeros={CZ:P0} | CLASS={Class}",
             DeviceName, duration.TotalSeconds, data.Length,
             NativeRms,
             convRms, convPeak, convMin, convMax, convZeroRatio,
@@ -581,8 +543,7 @@ public sealed class WaveInMicrophoneBackend : IDisposable
             {
                 _lastSilentWarnAt = now;
                 _logger.LogError(
-                    "[WaveInChunk] CLASS=NativeZero — device '{D}' index={Idx} delivers all-zero audio. " +
-                    "Try a different WaveIn device index. Available: {Devices}",
+                    "[WaveInChunk] CLASS=NativeZero — device '{D}' index={Idx} delivers all-zero audio. Try a different WaveIn device index. Available: {Devices}",
                     DeviceName, _deviceNumber,
                     string.Join(", ", WaveInMicrophoneBackend.EnumerateDevices().Select(d => $"[{d.Index}] {d.Name}")));
             }
@@ -594,8 +555,7 @@ public sealed class WaveInMicrophoneBackend : IDisposable
             {
                 _lastConvErrAt = now;
                 _logger.LogError(
-                    "[WaveInChunk] CLASS=ConversionDestroyedAudio — native RMS={NR:F4} but conv Peak={CP:F4}. " +
-                    "The resampling chain is destroying the signal.",
+                    "[WaveInChunk] CLASS=ConversionDestroyedAudio — native RMS={NR:F4} but conv Peak={CP:F4}. The resampling chain is destroying the signal.",
                     NativeRms, convPeak);
             }
         }
@@ -604,9 +564,9 @@ public sealed class WaveInMicrophoneBackend : IDisposable
         {
             DebugSaveReason? reason = null;
 
-            bool isSilent     = classification is AudioChunkClass.NativeZero or AudioChunkClass.NativeNearSilent;
-            bool isConvFail   = classification == AudioChunkClass.ConversionDestroyedAudio;
-            bool isTransition = _dbgPrevClass == AudioChunkClass.HealthyAudio && isSilent;
+            bool isSilent      = classification is AudioChunkClass.NativeZero or AudioChunkClass.NativeNearSilent;
+            bool isConvFail    = classification == AudioChunkClass.ConversionDestroyedAudio;
+            bool isTransition  = _dbgPrevClass == AudioChunkClass.HealthyAudio && isSilent;
             bool isAllZeroConv = convZeroRatio >= 1.0f;
 
             if (isSilent && !_dbgFirstSilentSaved)
@@ -625,7 +585,7 @@ public sealed class WaveInMicrophoneBackend : IDisposable
             }
             else if (isAllZeroConv && !_dbgFirstAllZeroConvSaved)
             {
-                reason = DebugSaveReason.FirstSilentChunk;   // reuse — ConvZeros=100%
+                reason = DebugSaveReason.FirstSilentChunk;
                 _dbgFirstAllZeroConvSaved = true;
             }
 
@@ -640,13 +600,11 @@ public sealed class WaveInMicrophoneBackend : IDisposable
                     var stamp   = DateTimeOffset.UtcNow;
                     var convFmt = new WaveFormat(TargetSampleRate, TargetBitsPerSample, TargetChannels);
 
-                    // Converted (Whisper-ready) WAV
                     var convPath = Path.Combine(_debugFolder,
                         $"mic_wavein_conv_{idx:D4}_{stamp:HHmmss}_{convRms:F3}.wav");
                     using (var w = new WaveFileWriter(convPath, convFmt))
                         w.Write(data, 0, data.Length);
 
-                    // Native WAV snapshot (whatever is in the rolling buffer right now)
                     string? nativePath = null;
                     if (_nativeFormat is not null && _nativeDebugBuffer.Length > 0)
                     {
@@ -660,26 +618,21 @@ public sealed class WaveInMicrophoneBackend : IDisposable
                         var nativeDurSec  = (double)nativeFrames / _nativeFormat.SampleRate;
                         using var wn = new WaveFileWriter(nativePath, _nativeFormat);
                         wn.Write(nativeSnap, 0, nativeBytes);
-                        // Reset so next event gets a fresh window (cap resets on next OnDataAvailable)
                         _nativeDebugBuffer = new MemoryStream();
 
                         _logger.LogInformation(
-                            "[WaveInDebug] NativeSnap: {Bytes}B  {Frames} frames  {Dur:F3}s  " +
-                            "@ {Rate}Hz/{Bits}bit/{Ch}ch",
+                            "[WaveInDebug] NativeSnap: {Bytes}B {Frames} frames {Dur:F3}s @ {Rate}Hz/{Bits}bit/{Ch}ch",
                             nativeBytes, nativeFrames, nativeDurSec,
                             _nativeFormat.SampleRate, _nativeFormat.BitsPerSample, _nativeFormat.Channels);
 
                         if (nativeDurSec < 0.5)
                             _logger.LogWarning(
-                                "[WaveInDebug] SHORT native snapshot: {Dur:F3}s (expected ≥ {Expected:F1}s). " +
-                                "Buffer had only {Bytes}B when save triggered.",
+                                "[WaveInDebug] SHORT native snapshot: {Dur:F3}s (expected ≥ {Expected:F1}s). Buffer had only {Bytes}B when save triggered.",
                                 nativeDurSec, _chunkDuration.TotalSeconds, nativeBytes);
                     }
 
                     _logger.LogInformation(
-                        "[WaveInDebug] Saved debug WAV. Reason={Reason} CLASS={Class} " +
-                        "NativeRMS={NR:F4} ConvRMS={CR:F4} ConvZeros={CZ:P0} " +
-                        "Conv={ConvPath} Native={NativePath}",
+                        "[WaveInDebug] Saved debug WAV. Reason={Reason} CLASS={Class} NativeRMS={NR:F4} ConvRMS={CR:F4} ConvZeros={CZ:P0} Conv={ConvPath} Native={NativePath}",
                         reason.Value, classification,
                         NativeRms, convRms, convZeroRatio,
                         convPath, nativePath ?? "(none)");
@@ -743,15 +696,11 @@ public sealed class WaveInMicrophoneBackend : IDisposable
     {
         if (_contWavWriter is null) return;
         try   { _contWavWriter.Dispose(); }
-        catch { /* best-effort */ }
+        catch { }
         _contWavWriter         = null;
         _contWavBytesRemaining = 0;
     }
 
-    /// <summary>
-    /// Multiplies every PCM16 sample in <paramref name="data"/> by <paramref name="gain"/>
-    /// in-place, clamping to the Int16 range.
-    /// </summary>
     private static void ApplyGainInPlace(byte[] data, float gain)
     {
         for (int i = 0; i + 1 < data.Length; i += 2)
@@ -763,8 +712,6 @@ public sealed class WaveInMicrophoneBackend : IDisposable
             data[i + 1] = (byte)((result >> 8) & 0xFF);
         }
     }
-
-    // ── Static helpers ────────────────────────────────────────────────────────
 
     private void BufferStartupCallbackLocked(byte[] buffer, int bytesRecorded, float nativeRms, float nativePeak)
     {
@@ -858,14 +805,8 @@ public sealed class WaveInMicrophoneBackend : IDisposable
         }
     }
 
-    /// <summary>
-    /// Returns the number of available WaveIn devices.
-    /// </summary>
     public static int DeviceCount => WaveIn.DeviceCount;
 
-    /// <summary>
-    /// Returns friendly names of all available WaveIn input devices.
-    /// </summary>
     public static IReadOnlyList<(int Index, string Name)> EnumerateDevices()
     {
         var list = new List<(int, string)>();
