@@ -22,7 +22,8 @@ public sealed class MicAudioSettings
     public int WaveInDeviceNumber { get; set; } = 0;
 
     /// <summary>
-    /// Chunk duration applied to microphone capture at session start.
+    /// Stable Phase-1 microphone chunk duration. The coordinator currently reads the
+    /// corresponding transcription setting at session start; keep both defaults aligned.
     /// </summary>
-    public TimeSpan ChunkDuration { get; set; } = TimeSpan.FromMilliseconds(900);
+    public TimeSpan ChunkDuration { get; set; } = TimeSpan.FromMilliseconds(1000);
 }
