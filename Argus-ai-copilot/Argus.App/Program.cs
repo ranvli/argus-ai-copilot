@@ -24,26 +24,29 @@ internal static class Program
     internal static IHostBuilder CreateHostBuilder() =>
         Host.CreateDefaultBuilder()
 
-            // ── Configuration ─────────────────────────────────────────────────
             .ConfigureAppConfiguration((ctx, cfg) =>
             {
-                // Additional sources (user secrets, key vault, etc.) go here.
             })
 
-            // ── Logging ───────────────────────────────────────────────────────
             .ConfigureLogging((ctx, logging) =>
             {
                 logging.ClearProviders();
+                logging.SetMinimumLevel(LogLevel.Debug);
+                logging.AddFilter("Microsoft", LogLevel.Warning);
+                logging.AddFilter("System", LogLevel.Warning);
+                logging.AddFilter("Argus", LogLevel.Debug);
                 logging.AddDebug();
 
                 if (ctx.HostingEnvironment.IsDevelopment())
                     logging.AddConsole();
+
+                var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+                var logDirectory = Path.Combine(localAppData, "ArgusAI", "logs");
+                logging.AddProvider(new DiagnosticFileLoggerProvider(logDirectory));
             })
 
-            // ── Services ──────────────────────────────────────────────────────
             .ConfigureServices((ctx, services) =>
             {
-                // ── Strong-typed configuration sections ───────────────────────
                 services.Configure<ApplicationOptions>(
                     ctx.Configuration.GetSection(ApplicationOptions.SectionName));
 
@@ -59,36 +62,18 @@ internal static class Program
                 services.Configure<TranscriptionRuntimeSettings>(
                     ctx.Configuration.GetSection(TranscriptionRuntimeSettings.SectionName));
 
-                // ── Infrastructure: SQLite, repositories, artifact storage ─────
-                // DbInitializer is registered inside this call as a hosted service
-                // and will run before SessionCoordinatorService starts.
                 services.AddArgusInfrastructure();
-
-                // ── AI layer: providers, discovery, model selection ────────────
                 services.AddArgusAI(ctx.Configuration);
-
-                // ── Context layer: active window tracking ─────────────────────
                 services.AddArgusContext();
-
-                // ── Audio capture + transcription pipeline ─────────────────────
                 services.AddArgusTranscription();
 
-                // ── Core application services ──────────────────────────────────
                 services.AddSingleton<IAppBootstrapper, AppBootstrapper>();
-
-                // ── Application state ──────────────────────────────────────────
                 services.AddSingleton<IAppStateService, AppStateService>();
 
-                // ── System-tray ────────────────────────────────────────────────
-                // Registered as both ITrayService and IHostedService.
-                // A single instance is shared via the factory delegate.
                 services.AddSingleton<TrayService>();
                 services.AddSingleton<ITrayService>(sp => sp.GetRequiredService<TrayService>());
                 services.AddHostedService(sp => sp.GetRequiredService<TrayService>());
 
-                // ── Session coordinator ────────────────────────────────────────
-                // Singleton so it can be injected as ISessionCoordinator anywhere.
-                // Also registered as IHostedService for the BackgroundService pump.
                 services.AddSingleton<AssistantReactionService>();
                 services.AddSingleton<IAssistantReactionPublisher>(
                     sp => sp.GetRequiredService<AssistantReactionService>());
@@ -102,8 +87,6 @@ internal static class Program
                 services.AddHostedService(
                     sp => sp.GetRequiredService<SessionCoordinatorService>());
 
-                // ── Startup diagnostics ────────────────────────────────────────
-                // Singleton: holds the result; also IHostedService to run the check.
                 services.AddSingleton<StartupDiagnosticsService>();
                 services.AddSingleton<IStartupDiagnosticsService>(
                     sp => sp.GetRequiredService<StartupDiagnosticsService>());
@@ -115,7 +98,6 @@ internal static class Program
                 services.AddSingleton<SherpaNativePreflightHostedService>();
                 services.AddHostedService(sp => sp.GetRequiredService<SherpaNativePreflightHostedService>());
 
-                // ── Application windows ────────────────────────────────────────
                 services.AddSingleton<MainWindow>();
             });
 }
