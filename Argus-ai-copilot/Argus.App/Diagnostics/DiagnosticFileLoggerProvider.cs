@@ -118,9 +118,12 @@ internal sealed class DiagnosticFileLoggerProvider : ILoggerProvider
                 new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite, 64 * 1024, useAsync: true),
                 new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false))
             {
-                AutoFlush = false
+                // The writer runs off the capture/UI threads, so flushing each line is
+                // acceptable and preserves the last diagnostics if native code kills the process.
+                AutoFlush = true
             };
-            _bytesWritten = new FileInfo(path).Exists ? new FileInfo(path).Length : 0;
+            var info = new FileInfo(path);
+            _bytesWritten = info.Exists ? info.Length : 0;
         }
         catch
         {
