@@ -39,7 +39,7 @@ public interface ISessionCoordinator
     Task<Session> StartSessionAsync(
         string title,
         SessionType type      = SessionType.FreeForm,
-        ListeningMode mode    = ListeningMode.Microphone,
+        ListeningMode mode    = ListeningMode.MicrophoneAndSystem,
         CancellationToken ct  = default);
 
     /// <summary>
